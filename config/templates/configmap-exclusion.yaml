@@ -1,12 +1,17 @@
-{{ range $path, $_ :=  .Files.Glob  "exclusions/*.yaml" }}
-{{ $cfg := $.Files.Get $path | fromYaml }}
-{{ $name := $path | base | replace ".yaml" ""}}
+{{- range $path, $_ := .Files.Glob "exclusions/*.yaml" }}
+{{- $name := $path | base | trimSuffix ".yaml" }}
+{{- if or (gt (len $name) 52) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $name)) }}
+{{- fail (printf "exclusion file %s must have a DNS-1123 basename of at most 52 characters" $path) }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $name }}-exclusion
+  name: {{ printf "%s-exclusion" $name | quote }}
+  labels:
+    app.kubernetes.io/name: venator
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
 data:
-  {{ $name }}.yaml: |- 
+  {{ printf "%s.yaml" $name | quote }}: |-
 {{ $.Files.Get $path | indent 4 }}
-{{ end }}
+{{- end }}

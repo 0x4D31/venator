@@ -1,55 +1,136 @@
-{{ range $path, $_ :=  .Files.Glob  "rules/**.yaml" }}
-{{ $cfg := $.Files.Get $path | fromYaml }}
+{{- range $path, $_ := .Files.Glob "rules/**.yaml" }}
+{{- $cfg := $.Files.Get $path | fromYaml }}
+{{- if or (not (kindIs "string" $cfg.name)) (gt (len $cfg.name) 52) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $cfg.name)) }}
+{{- fail (printf "rule in %s has name %q; Helm rule names must be DNS-1123 labels of at most 52 characters" $path $cfg.name) }}
+{{- end }}
 {{- if eq $cfg.enabled true }}
+{{- $exclusionPath := default "" $cfg.exclusionsPath }}
+{{- $exclusionName := $exclusionPath | base | trimSuffix ".yaml" }}
+{{- $ruleSecretEnv := default (list) (get $.Values.ruleSecretEnv $cfg.name) }}
+{{- $allSecretEnv := concat $.Values.secretEnv $ruleSecretEnv }}
+{{- $ruleEnvFrom := default (list) (get $.Values.ruleEnvFrom $cfg.name) }}
+{{- $allEnvFrom := concat $.Values.envFrom $ruleEnvFrom }}
+{{- $ruleExtraVolumes := default (list) (get $.Values.ruleExtraVolumes $cfg.name) }}
+{{- $allExtraVolumes := concat $.Values.extraVolumes $ruleExtraVolumes }}
+{{- $ruleExtraVolumeMounts := default (list) (get $.Values.ruleExtraVolumeMounts $cfg.name) }}
+{{- $allExtraVolumeMounts := concat $.Values.extraVolumeMounts $ruleExtraVolumeMounts }}
+{{- $defaultServiceAccount := $.Values.serviceAccount.name }}
+{{- if and $.Values.serviceAccount.create (not $defaultServiceAccount) }}
+{{- $defaultServiceAccount = printf "%s-venator" $.Release.Name }}
+{{- end }}
+{{- $serviceAccount := default $defaultServiceAccount (get $.Values.ruleServiceAccounts $cfg.name) }}
 ---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ $cfg.name }}
+  name: {{ $cfg.name | quote }}
+  labels:
+    app.kubernetes.io/name: venator
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+    app.kubernetes.io/version: {{ $.Chart.AppVersion | quote }}
+    venator.io/rule: {{ $cfg.name | quote }}
 spec:
-  timeZone: "Etc/UTC"
-  schedule: {{ $cfg.schedule | quote }}
+  timeZone: {{ $.Values.cronJob.timeZone | quote }}
+  schedule: {{ required (printf "rule %s requires schedule" $cfg.name) $cfg.schedule | quote }}
+  concurrencyPolicy: {{ $.Values.cronJob.concurrencyPolicy | quote }}
+  startingDeadlineSeconds: {{ $.Values.cronJob.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $.Values.cronJob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $.Values.cronJob.failedJobsHistoryLimit }}
   jobTemplate:
     spec:
+      activeDeadlineSeconds: {{ $.Values.cronJob.activeDeadlineSeconds }}
+      backoffLimit: {{ $.Values.cronJob.backoffLimit }}
+      {{- if ne $.Values.cronJob.ttlSecondsAfterFinished nil }}
+      ttlSecondsAfterFinished: {{ $.Values.cronJob.ttlSecondsAfterFinished }}
+      {{- end }}
       template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: venator
+            app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+            venator.io/rule: {{ $cfg.name | quote }}
+          {{- with $.Values.podAnnotations }}
+          annotations:
+{{ toYaml . | indent 12 }}
+          {{- end }}
         spec:
+          automountServiceAccountToken: {{ $.Values.serviceAccount.automountServiceAccountToken }}
+          {{- if $serviceAccount }}
+          serviceAccountName: {{ $serviceAccount | quote }}
+          {{- end }}
+          restartPolicy: Never
+          securityContext:
+{{ toYaml $.Values.podSecurityContext | indent 12 }}
+          {{- with $.Values.imagePullSecrets }}
+          imagePullSecrets:
+{{ toYaml . | indent 12 }}
+          {{- end }}
           containers:
-          - name: {{ $.Values.container.name }}
-            imagePullPolicy: Always
-            image: {{ $.Values.container.image }}
-            volumeMounts:
-            - name: rule-volume
-              mountPath: /app/rule
-            - name: config-volume
-              mountPath: /app/config
-            - name: exclusion-volume
-              mountPath: /app/exclusion
-            args:
-              - "--rule-config"
-              - "/app/rule/{{ $cfg.name }}.yaml"
-              - "--global-config"
-              - "/app/config/global_config.yaml"
-            env:
-            - name: OPENSEARCH_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: OSPASSWORD
-                  name: {{ $.Release.Name }}-secret
-            # - name: LLM_API_KEY
-            #   valueFrom:
-            #     secretKeyRef:
-            #       key: llmApiKey
-            #       name: {{ $.Release.Name }}-secret
+            - name: {{ $.Values.container.name | quote }}
+              image: {{ $.Values.container.image | quote }}
+              imagePullPolicy: {{ $.Values.container.imagePullPolicy | quote }}
+              securityContext:
+{{ toYaml $.Values.containerSecurityContext | indent 16 }}
+              resources:
+{{ toYaml $.Values.resources | indent 16 }}
+              args:
+                - run
+                - --rule-config
+                - /app/rule/{{ $cfg.name }}.yaml
+                - --global-config
+                - /app/config/global_config.yaml
+              {{- if or $allSecretEnv $.Values.extraEnv }}
+              env:
+                {{- range $allSecretEnv }}
+                - name: {{ .name | quote }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ default (printf "%s-secret" $.Release.Name) .secretName | quote }}
+                      key: {{ .key | quote }}
+                      optional: {{ default false .optional }}
+                {{- end }}
+                {{- with $.Values.extraEnv }}
+{{ toYaml $.Values.extraEnv | indent 16 }}
+                {{- end }}
+              {{- end }}
+              {{- with $allEnvFrom }}
+              envFrom:
+{{ toYaml . | indent 16 }}
+              {{- end }}
+              volumeMounts:
+                - name: rule-volume
+                  mountPath: /app/rule
+                  readOnly: true
+                - name: config-volume
+                  mountPath: /app/config
+                  readOnly: true
+                {{- if $exclusionPath }}
+                - name: exclusion-volume
+                  mountPath: /app/exclusion
+                  readOnly: true
+                {{- end }}
+                - name: tmp
+                  mountPath: /tmp
+                {{- with $allExtraVolumeMounts }}
+{{ toYaml . | indent 16 }}
+                {{- end }}
           volumes:
-          - name: rule-volume
-            configMap:
-              name: "{{ $cfg.name }}-config"
-          - name: config-volume
-            configMap:
-              name: "global-config"
-          - name: exclusion-volume
-            configMap:
-              name: "{{ $cfg.name }}-exclusion"
-          restartPolicy: OnFailure
-{{ end }}
-{{ end }}
+            - name: rule-volume
+              configMap:
+                name: {{ printf "%s-config" $cfg.name | quote }}
+            - name: config-volume
+              configMap:
+                name: global-config
+            {{- if $exclusionPath }}
+            - name: exclusion-volume
+              configMap:
+                name: {{ printf "%s-exclusion" $exclusionName | quote }}
+            {{- end }}
+            - name: tmp
+              emptyDir:
+                sizeLimit: 16Mi
+            {{- with $allExtraVolumes }}
+{{ toYaml . | indent 12 }}
+            {{- end }}
+{{- end }}
+{{- end }}

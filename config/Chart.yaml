@@ -1,6 +1,11 @@
 apiVersion: v2
-appVersion: "0.5"
 name: venator
-description: Deploys Venator in Kubernetes.
+description: Deploy each Venator detection rule as an observable Kubernetes CronJob.
 type: application
-version: "0.5"
+version: 0.2.0
+appVersion: "0.2.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/0x4D31/venator
+icon: https://raw.githubusercontent.com/0x4D31/venator/main/docs/images/logo.png
+sources:
+  - https://github.com/0x4D31/venator

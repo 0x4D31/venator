@@ -1,0 +1,54 @@
+name: venator-clickhouse
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3
+    environment:
+      CLICKHOUSE_USER: venator
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "127.0.0.1:${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+      - "127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ../../connector/clickhouse/schema.sql:/docker-entrypoint-initdb.d/001-venator-findings.sql:ro
+      - ./init/002-authentication.sql:/docker-entrypoint-initdb.d/002-authentication.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user venator --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  venator:
+    profiles: ["run"]
+    image: ${VENATOR_IMAGE:-ghcr.io/0x4d31/venator:v0.2.0}
+    build:
+      context: ../..
+      args:
+        VERSION: 0.2.0
+    command:
+      - run
+      - --global-config
+      - /etc/venator/global.yaml
+      - --rule-config
+      - /etc/venator/rule.yaml
+    environment:
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
+    volumes:
+      - ./global.yaml:/etc/venator/global.yaml:ro
+      - ../../config/examples/clickhouse-rule.yaml:/etc/venator/rule.yaml:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    user: "65532:65532"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
+volumes:
+  clickhouse-data:

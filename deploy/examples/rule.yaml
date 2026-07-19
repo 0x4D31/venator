@@ -1,0 +1,18 @@
+name: local-file-snapshot
+uid: 332d70c1-a213-4f7c-b7f2-43686a9800b1
+status: example
+confidence: low
+enabled: true
+schedule: "5 * * * *"
+queryEngine: file.ndjson
+publishers: [stdout.default]
+language: NDJSON
+query: events.ndjson
+output:
+  format: raw
+  fields: []
+description: Emit findings for a finite local NDJSON snapshot.
+references: []
+tags: [example, local]
+author: 0x4D31
+ttps: []

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Venator detection rule %i hourly
+
+[Timer]
+Unit=venator@%i.service
+OnCalendar=*-*-* *:05:00
+Persistent=true
+RandomizedDelaySec=2min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

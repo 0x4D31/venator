@@ -3,10 +3,10 @@ name: stage-2-signal
 uid: f1e2d3c4-b5a6-7890-cdef-gh1234567890
 status: experimental
 confidence: medium
-enabled: true
+enabled: false  # Template only; enable after replacing the example query/connectors.
 schedule: "0 * * * *"
 queryEngine: bigquery.signals  # Query the signals database
-exclusionsPath: app/exclusion/example-exclusion2.yaml  # Path to exclusion rules to filter out known benign events
+exclusionsPath: /app/exclusion/example-rule.yaml  # Mounted conditionally by the Helm chart.
 publishers:
   - bigquery.signals # Publishes the stage-2 signal to the signals database for future correlation/aggregation
   - pubsub.alerts  # Publishes alerts to PubSub for triggering security automation or notifications
@@ -32,7 +32,7 @@ output:
       source: timestamp
     # <other fields>
 description:
-  This stage-2 signal (or correlated alert) aggregates signals from the BigQuery signals table and triggers alerts when certain thresholds are exceeded. 
+  This stage-2 signal (or correlated alert) aggregates signals from the BigQuery signals table and triggers alerts when certain thresholds are exceeded.
   Stage-2 correlation is used for low to medium fidelity signals, aggregating multiple events to raise a higher-confidence alert.
 references:
   - https://examplelink

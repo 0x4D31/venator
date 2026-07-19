@@ -1,0 +1,6 @@
+from_file "deploy/tenzir-clickhouse/*.ndjson", watch=10s
+timestamp = timestamp.time()
+select event_id, timestamp, username, source_ip, outcome
+to_clickhouse table="security.authentication", mode="append",
+  host="127.0.0.1", port=9000, user="venator",
+  password=secret("CLICKHOUSE_PASSWORD"), tls=false
