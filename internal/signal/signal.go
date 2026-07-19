@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nianticlabs/venator/internal/config"
+	"github.com/0x4D31/venator/internal/config"
+	"github.com/0x4D31/venator/internal/model"
 )
 
 // Struct for the output Signal
 type Signal struct {
 	Timestamp        time.Time           `json:"timestamp"`
-	Rule_ID          string              `json:"rule_id"`
-	Rule_Name        string              `json:"rule_name"`
-	ConfidenceID     int                 `json:"confidenceid"`
+	RuleID           string              `json:"rule_id"`
+	RuleName         string              `json:"rule_name"`
+	ConfidenceID     int                 `json:"confidence_id"`
 	Confidence       string              `json:"confidence"`
 	TTPs             []map[string]string `json:"ttps"`
 	Actor            Actor               `json:"actor"`
@@ -22,7 +23,7 @@ type Signal struct {
 	DstEndpoint      Endpoint            `json:"dst_endpoint"`
 	Message          string              `json:"message"`
 	Metadata         Metadata            `json:"metadata"`
-	RuleSpecificData map[string]string   `json:"rule_specific_data"`
+	RuleSpecificData map[string]any      `json:"rule_specific_data,omitempty"`
 }
 
 type Actor struct {
@@ -60,13 +61,10 @@ const (
 	ConfidenceHigh    int = 3
 )
 
-func BuildSignal(result map[string]string, cfg *config.RuleConfig) (*Signal, error) {
-	if len(result) < len(cfg.Output.Fields) {
-		return nil, fmt.Errorf("number of query result fields mismatches expected count")
-	}
+func BuildSignal(result model.Record, cfg *config.RuleConfig) (*Signal, error) {
 	signal := Signal{
-		Rule_ID:      cfg.UID,
-		Rule_Name:    cfg.Name,
+		RuleID:       cfg.UID,
+		RuleName:     cfg.Name,
 		ConfidenceID: getConfidenceID(cfg.Confidence),
 		Confidence:   string(cfg.Confidence),
 		TTPs:         []map[string]string{},
@@ -77,21 +75,30 @@ func BuildSignal(result map[string]string, cfg *config.RuleConfig) (*Signal, err
 			"tactic":    ttp.Tactic,
 			"name":      ttp.Name,
 			"id":        ttp.ID,
+			"reference": ttp.Reference,
 		})
 	}
 
 	for _, outputField := range cfg.Output.Fields {
-		value, exists := result[outputField.Source]
+		rawValue, exists := result[outputField.Source]
 		if !exists {
 			return nil, fmt.Errorf("source field %s not found in query results", outputField.Source)
 		}
+		value, ok := model.StringValue(rawValue)
+		if !ok {
+			return nil, fmt.Errorf("source field %s cannot be represented as text", outputField.Source)
+		}
 		switch outputField.Field {
 		case "Timestamp":
-			parsedTime, err := time.Parse(time.RFC3339, value)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse timestamp: %w", err)
+			if typedTime, ok := rawValue.(time.Time); ok {
+				signal.Timestamp = typedTime.UTC()
+				break
 			}
-			signal.Timestamp = parsedTime
+			parsedTime, err := time.Parse(time.RFC3339Nano, value)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse timestamp from %s: %w", outputField.Source, err)
+			}
+			signal.Timestamp = parsedTime.UTC()
 		case "ActorUserName":
 			signal.Actor.User.Name = value
 		case "ActorUserUID":
@@ -117,14 +124,18 @@ func BuildSignal(result map[string]string, cfg *config.RuleConfig) (*Signal, err
 		case "EventIndex":
 			signal.Metadata.EventIndex = value
 		case "RuleSpecificData":
-			var rsd map[string]interface{}
-			if err := json.Unmarshal([]byte(value), &rsd); err == nil {
-				signal.RuleSpecificData = make(map[string]string)
-				for k, v := range rsd {
-					signal.RuleSpecificData[k] = fmt.Sprintf("%v", v)
+			switch typed := rawValue.(type) {
+			case map[string]any:
+				signal.RuleSpecificData = typed
+			case string, []byte:
+				var rsd map[string]any
+				if err := json.Unmarshal([]byte(value), &rsd); err == nil {
+					signal.RuleSpecificData = rsd
+				} else {
+					signal.RuleSpecificData = map[string]any{"raw": rawValue}
 				}
-			} else {
-				signal.RuleSpecificData = map[string]string{"raw": value}
+			default:
+				signal.RuleSpecificData = map[string]any{"raw": rawValue}
 			}
 
 		default:
@@ -134,7 +145,7 @@ func BuildSignal(result map[string]string, cfg *config.RuleConfig) (*Signal, err
 	return &signal, nil
 }
 
-func BuildOutput(result map[string]string, cfg *config.RuleConfig) (any, error) {
+func BuildOutput(result model.Record, cfg *config.RuleConfig) (any, error) {
 	var output any
 	switch cfg.Output.Format {
 	case config.OutputFormatSignal:

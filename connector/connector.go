@@ -3,7 +3,8 @@ package connector
 import (
 	"context"
 
-	"github.com/nianticlabs/venator/internal/config"
+	"github.com/0x4D31/venator/internal/config"
+	"github.com/0x4D31/venator/internal/model"
 )
 
 type Connector interface {
@@ -11,9 +12,13 @@ type Connector interface {
 }
 
 type QueryRunner interface {
-	Query(ctx context.Context, ruleConfig *config.RuleConfig) ([]map[string]string, error)
+	Query(ctx context.Context, ruleConfig *config.RuleConfig) ([]model.Record, error)
 }
 
 type Publisher interface {
-	Publish(ctx context.Context, data []map[string]string, ruleConfig *config.RuleConfig) error
+	Publish(ctx context.Context, batch model.PublishBatch) error
+}
+
+type Closer interface {
+	Close() error
 }

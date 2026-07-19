@@ -3,18 +3,20 @@ services:
   opensearch:
     image: opensearchproject/opensearch:2.13.0
     ports:
-      - "9200:9200"
-      - "9600:9600"
+      - "127.0.0.1:9200:9200"
+      - "127.0.0.1:9600:9600"
     environment:
-      OPENSEARCH_INITIAL_ADMIN_PASSWORD: dummy-password-9QW7dB4@HD
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?set a strong integration-test password}
       discovery.type: single-node
     volumes:
       - opensearch-data:/usr/share/opensearch/data
   open-search-dashboards:
     image: opensearchproject/opensearch-dashboards:2.13.0
     ports:
-      - "5601:5601"
+      - "127.0.0.1:5601:5601"
     environment:
       OPENSEARCH_HOSTS: "https://opensearch:9200"
+      OPENSEARCH_USERNAME: admin
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?set a strong integration-test password}
 volumes:
   opensearch-data:

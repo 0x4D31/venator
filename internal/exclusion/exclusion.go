@@ -2,10 +2,12 @@ package exclusion
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
 
+	"github.com/0x4D31/venator/internal/model"
 	"gopkg.in/yaml.v3"
 )
 
@@ -15,6 +17,7 @@ type Condition struct {
 	Operator string   `yaml:"operator"`
 	Value    string   `yaml:"value"`
 	Values   []string `yaml:"values,omitempty"` // For 'in' and 'not_in' operators
+	regex    *regexp.Regexp
 }
 
 // ExclusionRule represents a single exclusion rule with conditions.
@@ -43,27 +46,36 @@ func NewExcluder(path string) (*Excluder, error) {
 
 	var rules []ExclusionRule
 	decoder := yaml.NewDecoder(file)
+	decoder.KnownFields(true)
 	if err := decoder.Decode(&rules); err != nil {
 		return nil, fmt.Errorf("failed to decode exclusions YAML: %w", err)
 	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("failed to decode exclusions YAML: multiple YAML documents are not supported")
+		}
+		return nil, fmt.Errorf("failed to decode exclusions YAML: %w", err)
+	}
 
-	// Validate operators and precompile regex patterns
-	for i, rule := range rules {
-		for _, cond := range rule.Conditions.And {
-			condCopy := cond
-			if err := validateCondition(&condCopy); err != nil {
+	// Validate operators and precompile regex patterns.
+	for i := range rules {
+		if len(rules[i].Conditions.And) > 0 && len(rules[i].Conditions.Or) > 0 {
+			return nil, fmt.Errorf("invalid condition group in rule %d: and/or are mutually exclusive", i+1)
+		}
+		if len(rules[i].Conditions.And) == 0 && len(rules[i].Conditions.Or) == 0 {
+			return nil, fmt.Errorf("invalid condition group in rule %d: one of and/or is required", i+1)
+		}
+		for j := range rules[i].Conditions.And {
+			if err := validateCondition(&rules[i].Conditions.And[j]); err != nil {
 				return nil, fmt.Errorf("invalid condition in rule %d: %w", i+1, err)
 			}
 		}
-
-		for _, cond := range rule.Conditions.Or {
-			condCopy := cond
-			if err := validateCondition(&condCopy); err != nil {
+		for j := range rules[i].Conditions.Or {
+			if err := validateCondition(&rules[i].Conditions.Or[j]); err != nil {
 				return nil, fmt.Errorf("invalid condition in rule %d: %w", i+1, err)
 			}
 		}
-
-		rules[i].Conditions = rule.Conditions // Ensure any modifications are kept
 	}
 
 	return &Excluder{rules: rules}, nil
@@ -75,9 +87,11 @@ func validateCondition(cond *Condition) error {
 	case "equals", "contains", "not_equals":
 		// No additional validation needed
 	case "regex":
-		if _, err := regexp.Compile(cond.Value); err != nil {
+		compiled, err := regexp.Compile(cond.Value)
+		if err != nil {
 			return fmt.Errorf("invalid regex pattern '%s': %w", cond.Value, err)
 		}
+		cond.regex = compiled
 	case "in", "not_in":
 		if len(cond.Values) == 0 {
 			return fmt.Errorf("operator '%s' requires 'values' field to be non-empty", cond.Operator)
@@ -90,7 +104,7 @@ func validateCondition(cond *Condition) error {
 
 // IsExcluded checks if a given result matches any exclusion rule.
 // Returns true if excluded, otherwise false.
-func (e *Excluder) IsExcluded(result map[string]string) bool {
+func (e *Excluder) IsExcluded(result model.Record) bool {
 	for _, rule := range e.rules {
 		if evaluateConditionGroup(rule.Conditions, result) {
 			return true
@@ -100,7 +114,7 @@ func (e *Excluder) IsExcluded(result map[string]string) bool {
 }
 
 // evaluateConditionGroup evaluates a group of conditions ("And" or "Or") against the result.
-func evaluateConditionGroup(group ConditionGroup, result map[string]string) bool {
+func evaluateConditionGroup(group ConditionGroup, result model.Record) bool {
 	if len(group.And) > 0 {
 		for _, cond := range group.And {
 			if !evaluateCondition(cond, result) {
@@ -124,9 +138,13 @@ func evaluateConditionGroup(group ConditionGroup, result map[string]string) bool
 }
 
 // evaluateCondition evaluates a single condition against the result.
-func evaluateCondition(cond Condition, result map[string]string) bool {
-	value, exists := result[cond.Field]
+func evaluateCondition(cond Condition, result model.Record) bool {
+	rawValue, exists := result[cond.Field]
 	if !exists {
+		return false
+	}
+	value, ok := model.StringValue(rawValue)
+	if !ok {
 		return false
 	}
 
@@ -138,12 +156,7 @@ func evaluateCondition(cond Condition, result map[string]string) bool {
 	case "contains":
 		return strings.Contains(value, cond.Value)
 	case "regex":
-		matched, err := regexp.MatchString(cond.Value, value)
-		if err != nil {
-			// Log the error if necessary; for now, treat as non-matching
-			return false
-		}
-		return matched
+		return cond.regex != nil && cond.regex.MatchString(value)
 	case "in":
 		for _, v := range cond.Values {
 			if value == v {

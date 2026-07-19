@@ -14,9 +14,9 @@ query: SELECT * FROM logs
 output:
   format: signal
   fields:
-    - field: Field1
+    - field: Message
       source: f1
-    - field: Field2
+    - field: ResourceName
       source: f2
 description: this is a test rule.
 references:

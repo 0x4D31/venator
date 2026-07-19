@@ -5,4 +5,6 @@ type Config struct {
 	Username           string
 	Password           string
 	InsecureSkipVerify bool
+	MaxRows            int
+	MaxBytes           int64
 }

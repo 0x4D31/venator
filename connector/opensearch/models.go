@@ -1,19 +1,27 @@
 package opensearch
 
-// BulkQueryResponse defines a struct to match the structure of an OpenSearch bulk query (Publish) response.
+import "encoding/json"
+
+// BulkQueryResponse matches the subset of an OpenSearch bulk response that
+// determines whether every finding was accepted.
 type BulkQueryResponse struct {
-	Took   int                                 `json:"took"`
-	Errors bool                                `json:"errors"`
-	Items  []map[string]map[string]interface{} `json:"items"`
+	Took   int                              `json:"took"`
+	Errors bool                             `json:"errors"`
+	Items  []map[string]BulkQueryItemResult `json:"items"`
 }
 
-// QueryResponse defines a struct to match the structure of an OpenSearch query response.
+type BulkQueryItemResult struct {
+	Status int             `json:"status"`
+	Error  json.RawMessage `json:"error,omitempty"`
+}
+
 type QueryResponse struct {
 	Schema   []map[string]string `json:"schema"`
-	Datarows [][]interface{}     `json:"datarows"`
+	Datarows [][]any             `json:"datarows"`
 	Total    int                 `json:"total"`
 	Size     int                 `json:"size"`
 	Status   int                 `json:"status"`
+	Cursor   string              `json:"cursor"`
 }
 
 type QueryErrorResponse struct {
@@ -27,10 +35,11 @@ type QueryError struct {
 	Type    string `json:"type"`
 }
 
-type CreateReq struct {
+type IndexReq struct {
 	Index string `json:"_index"`
+	ID    string `json:"_id"`
 }
 
 type BulkRequestOp struct {
-	Create *CreateReq `json:"create,omitempty"`
+	Index *IndexReq `json:"index,omitempty"`
 }

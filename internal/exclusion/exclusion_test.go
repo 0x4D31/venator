@@ -1,8 +1,12 @@
 package exclusion
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/0x4D31/venator/internal/model"
 )
 
 func TestExcluder(t *testing.T) {
@@ -15,12 +19,12 @@ func TestExcluder(t *testing.T) {
 	}
 
 	tests := []struct {
-		result   map[string]string
+		result   model.Record
 		excluded bool
 	}{
 		// Test 'equals' operator with 'and' conditions
 		{
-			result: map[string]string{
+			result: model.Record{
 				"username":   "test",
 				"ip_address": "192.168.1.1",
 			},
@@ -28,7 +32,7 @@ func TestExcluder(t *testing.T) {
 		},
 		// Test 'contains' operator with 'or' conditions
 		{
-			result: map[string]string{
+			result: model.Record{
 				"email":    "user@example.com",
 				"domain":   "external.com",
 				"username": "user1",
@@ -37,7 +41,7 @@ func TestExcluder(t *testing.T) {
 		},
 		// Test 'equals' operator with 'or' conditions
 		{
-			result: map[string]string{
+			result: model.Record{
 				"email":    "user@external.com",
 				"domain":   "internal.local",
 				"username": "user2",
@@ -46,7 +50,7 @@ func TestExcluder(t *testing.T) {
 		},
 		// Test 'equals' operator with 'and' conditions
 		{
-			result: map[string]string{
+			result: model.Record{
 				"response_time": "fast",
 				"status_code":   "200",
 			},
@@ -54,7 +58,7 @@ func TestExcluder(t *testing.T) {
 		},
 		// Test 'equals' operator with 'or' conditions
 		{
-			result: map[string]string{
+			result: model.Record{
 				"user_role": "admin",
 				"username":  "adminuser",
 			},
@@ -62,28 +66,28 @@ func TestExcluder(t *testing.T) {
 		},
 		// Test 'in' operator
 		{
-			result: map[string]string{
+			result: model.Record{
 				"department": "sales",
 			},
 			excluded: true,
 		},
 		// Test 'not_equals' operator
 		{
-			result: map[string]string{
+			result: model.Record{
 				"status": "inactive",
 			},
 			excluded: true,
 		},
 		// Test 'not_in' operator
 		{
-			result: map[string]string{
+			result: model.Record{
 				"region": "eu-west-1",
 			},
 			excluded: true,
 		},
 		// Test non-excluded result
 		{
-			result: map[string]string{
+			result: model.Record{
 				"user_role": "user",
 				"username":  "regularuser",
 			},
@@ -91,7 +95,7 @@ func TestExcluder(t *testing.T) {
 		},
 		// Test partial match for 'and' conditions (should not exclude)
 		{
-			result: map[string]string{
+			result: model.Record{
 				"username":      "test",
 				"ip_address":    "10.0.0.1",
 				"response_time": "slow",
@@ -100,32 +104,32 @@ func TestExcluder(t *testing.T) {
 		},
 		// Test 'regex' operator - matching URLs
 		{
-			result: map[string]string{
+			result: model.Record{
 				"url": "https://www.example.com/path",
 			},
 			excluded: true,
 		},
 		{
-			result: map[string]string{
+			result: model.Record{
 				"url": "http://example.com/anotherpath",
 			},
 			excluded: true,
 		},
 		{
-			result: map[string]string{
+			result: model.Record{
 				"url": "https://sub.example.com/path",
 			},
 			excluded: true, // Now should pass with updated regex
 		},
 		// Test 'regex' operator with non-matching URL
 		{
-			result: map[string]string{
+			result: model.Record{
 				"url": "https://www.test.com/path",
 			},
 			excluded: false,
 		},
 		{
-			result: map[string]string{
+			result: model.Record{
 				"url": "ftp://example.com/resource",
 			},
 			excluded: false,
@@ -137,5 +141,44 @@ func TestExcluder(t *testing.T) {
 		if excluded != tt.excluded {
 			t.Errorf("Test case %d: expected excluded=%v, got %v", i+1, tt.excluded, excluded)
 		}
+	}
+}
+
+func TestNewExcluderRejectsUnknownFieldsAndMixedBooleanGroups(t *testing.T) {
+	tests := []string{
+		"- conditions:\n    xor: []\n",
+		"- conditions:\n    and:\n      - field: x\n        operator: equals\n        value: y\n    or:\n      - field: x\n        operator: equals\n        value: z\n",
+	}
+	for _, content := range tests {
+		path := filepath.Join(t.TempDir(), "exclusions.yaml")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewExcluder(path); err == nil {
+			t.Fatalf("expected error for:\n%s", content)
+		}
+	}
+}
+
+func TestNewExcluderRejectsMultipleYAMLDocuments(t *testing.T) {
+	content := `
+- conditions:
+    and:
+      - field: user
+        operator: equals
+        value: alice
+---
+- conditions:
+    or:
+      - field: user
+        operator: equals
+        value: bob
+`
+	path := filepath.Join(t.TempDir(), "exclusions.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("error = %v", err)
 	}
 }
