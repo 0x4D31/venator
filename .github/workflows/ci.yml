@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "agent/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go test, race, vet, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+      - run: go mod download
+      - name: Formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Unit tests
+        run: go test -count=1 ./...
+      - name: Race detector
+        run: go test -race -count=1 ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Static analysis
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 ./...
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - name: Static build
+        run: CGO_ENABLED=0 go build -trimpath -o dist/venator .
+      - name: Local NDJSON smoke test
+        run: |
+          dist/venator validate \
+            --global-config deploy/examples/global.yaml \
+            --rule-config deploy/examples/rule.yaml
+          dist/venator run \
+            --global-config deploy/examples/global.yaml \
+            --rule-config deploy/examples/rule.yaml > dist/findings.ndjson
+          test "$(wc -l < dist/findings.ndjson)" -eq 2
+
+  container:
+    name: Container build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: ghcr.io/0x4d31/venator:v0.2.0-ci
+          build-args: VERSION=0.2.0
+
+  helm:
+    name: Helm and Kubernetes render
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: azure/setup-kubectl@v4
+      - name: Lint chart
+        run: helm lint config --strict
+      - name: Render rule CronJobs
+        run: |
+          cp -R config /tmp/venator-chart
+          sed -i 's/enabled: false/enabled: true/' \
+            /tmp/venator-chart/rules/example/single-stage-alert.yaml
+          helm template venator /tmp/venator-chart --namespace venator > /tmp/venator.yaml
+          grep -q '^kind: CronJob$' /tmp/venator.yaml
+          helm template venator /tmp/venator-chart --namespace venator \
+            -f /tmp/venator-chart/examples/clickhouse-mtls-values.yaml > /tmp/venator-mtls.yaml
+          grep -q 'mountPath: /var/run/secrets/venator/clickhouse' /tmp/venator-mtls.yaml
+      - name: Render plain Kubernetes assets
+        run: kubectl kustomize deploy/kubernetes > /tmp/venator-kustomize.yaml
+      - name: Validate portable deployment assets
+        run: |
+          sh -n scripts/*.sh deploy/launchd/run-example.sh
+          python3 - <<'PY'
+          import plistlib
+          with open('deploy/launchd/io.detect.venator.example.plist', 'rb') as f:
+              plistlib.load(f)
+          PY
+          docker compose -f deploy/docker-compose/compose.yaml config >/dev/null
+          CLICKHOUSE_PASSWORD=test-only docker compose -f deploy/clickhouse/compose.yaml config >/dev/null
+          OPENSEARCH_INITIAL_ADMIN_PASSWORD='Test-only-9QW7dB4@HD' \
+            docker compose -f connector/opensearch/docker-compose.yml config >/dev/null

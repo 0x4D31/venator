@@ -1,33 +1,164 @@
 <p align="center">
-<img src="docs/images/logo.png" width="200"/>
+  <img src="docs/images/logo.png" width="180" alt="Venator logo">
 </p>
 
-# Venator - Threat Detection Platform
+# Venator
 
-**A flexible detection system that simplifies rule management and deployment with K8s CronJob and Helm.**
+Venator is a scheduler-neutral batch detection engine. One invocation runs one
+versioned rule, turns typed query results into stable findings, delivers the
+same canonical envelope to every configured sink, and exits with an honest
+status code.
 
-Venator is optimized for Kubernetes deployment but is flexible enough to run standalone or with other job schedulers like Nomad. It provides a highly adaptable detection engine that prioritizes simplicity, extensibility, and ease of maintenance. Supporting multiple query engines and publishers, Venator allows you to easily switch between different data lakes or services with minimal changes, avoiding vendor lock-in and dependence on specific SIEM solutions for signal generation.
+It is intentionally not a SIEM, log shipper, or required Kubernetes service.
+Run it from a laptop, an AI-agent tool, launchd, systemd, Nomad, Docker, or a
+Kubernetes CronJob. The original design motivation is described in
+[Open-sourcing Venator](https://detect.fyi/open-sourcing-venator-b94374e30a55).
 
-## Why Venator?
+## v0.2.0 architecture
 
-Many existing open-source and commercial threat detection solutions lack effective tools for monitoring and managing scheduled detection rules. Common challenges include verifying whether detection jobs ran successfully, troubleshooting failed jobs, and running backfills or ad-hoc executions. Moreover, adding new detection rules or integrating new log sources often leads to unnecessary complexity.
+```mermaid
+flowchart LR
+  A["External scheduler"] --> V["Venator one-shot run"]
+  V --> S["Typed source"]
+  S --> E["Exclusions + deterministic envelope"]
+  E --> R["Optional advisory AI review"]
+  R --> P["Required and best-effort sinks"]
+  P --> X["Run report + exit code"]
+```
 
-## How It Works
+The important boundary is deterministic: source records are never replaced by
+model-generated records. AI review can add a structured verdict and reason to
+a stable finding ID, but a prompt injection, malformed model response, or API
+failure cannot silently erase a detection.
 
-Venator operates by running each detection rule as an independent job, allowing for flexible query execution and result handling. Each rule uses a query engine (e.g., OpenSearch, BigQuery) to fetch data, process the results, and publish the findings to one or more destinations like BigQuery for signal storage, or PubSub for alerts to trigger your automation system. This modular approach ensures that the failure of one rule doesn’t impact others.
+Every finding includes:
 
-### Key Components:
+- a stable SHA-256 ID derived from the rule UID and source evidence;
+- a per-execution run ID and timestamps;
+- rule, source, confidence, tag, and ATT&CK metadata;
+- commonly queried signal attributes; and
+- the lossless raw or normalized payload.
 
-- **Detection Rules**: Detection logic is defined in YAML files. Each rule specifies its own query engine and publishers, making it possible to query different data lakes in parallel or deliver results to different platforms. For example, one rule could query OpenSearch logs and publish alerts to PubSub, while another queries BigQuery and sends results to Slack. You can see some example rules [here](config/rules/).
-  
-- **Job Execution**: Venator schedules and runs each rule as a separate Kubernetes CronJob (or another job scheduler like Nomad). This scheduling allows rules to run at regular intervals (e.g., hourly, daily) or on-demand for ad-hoc queries. Kubernetes handles the lifecycle of these jobs, ensuring each rule runs in isolation.
+## Quick start without a SIEM
 
-- **Exclusions**: To reduce false positives, rules can reference exclusion lists, which filter out known benign events from the results before they’re published. These exclusion lists are also defined in YAML and support `and` and `or` conditions with operators like `equals`, `not_equals`, `contains`, `regex`, `in`, and `not_in`. Here is an [example](config/exclusions/example-rule.yaml) exclusion list.
+Venator v0.2.0 requires Go 1.25.12 or newer. Earlier Go 1.25 patch releases
+contain standard-library vulnerabilities in network paths Venator uses.
 
-- **LLM Integration**: Venator integrates with Large Language Models (LLMs) to provide enhanced signal analysis. This is particularly useful for analyzing or correlating lower-confidence signals that may not be suitable for immediate alerts.
+```sh
+go build -trimpath -o venator .
 
-- **Automated Deployment**: Venator's deployment model uses Helm to automate the process. Helm charts manage configuration files like detection rules, exclusions, and global settings as Kubernetes ConfigMaps. Through a CI/CD pipeline, any changes to detection rules or code automatically trigger new deployments, ensuring the system is always up-to-date without manual intervention.
+./venator validate \
+  --global-config deploy/examples/global.yaml \
+  --rule-config deploy/examples/rule.yaml
 
-## Deployment Guide
+./venator run \
+  --global-config deploy/examples/global.yaml \
+  --rule-config deploy/examples/rule.yaml
+```
 
-For detailed steps on deploying Venator using Helm and Kubernetes, see the [Deployment Guide](docs/deployment.md).
+The example needs no credentials or external service. It reads a finite NDJSON
+snapshot through `file.ndjson` and emits canonical finding NDJSON through
+`stdout.default`. A separate `stdin.default` source remains ideal for Tenzir or
+agent pipelines. Logs go to stderr, so stdout stays machine-readable. Legacy
+v0.1 flags without the `run` subcommand remain an alias during migration.
+
+Use `--report-file run.json` for an atomic JSON run report. Exit status is zero
+for a completed run (including no findings or a disabled rule) and non-zero for
+configuration, source, required-sink, timeout, or cancellation failures.
+`runtime.maxRecords` and `runtime.maxBytes` bound materialized results and
+canonical output before sink fan-out.
+
+## Sources and sinks
+
+| Connector | Source | Sink | Notes |
+| --- | ---: | ---: | --- |
+| stdin/stdout NDJSON | yes | yes | Built in; ideal for Tenzir, agents, and pipelines |
+| finite NDJSON file | yes | no | `file.ndjson`; rule-relative path, no hidden checkpoint state |
+| ClickHouse | yes | yes | Official Go driver, native/HTTP, typed rows, bounded queries, batch writes |
+| OpenSearch | yes | yes | Context-aware SQL query and idempotent bulk finding writes |
+| BigQuery | yes | yes | Typed query values; sink role requires dataset and table |
+| Pub/Sub | no | yes | Canonical finding messages with serialization and publish failures surfaced |
+| Slack | no | yes | Context-aware webhook delivery of canonical findings |
+
+ClickHouse configuration and a home-lab Compose stack are in
+[`connector/clickhouse/`](connector/clickhouse/) and
+[`deploy/clickhouse/`](deploy/clickhouse/). Tenzir can either stream filtered
+NDJSON directly into Venator or collect into ClickHouse; see
+[`deploy/tenzir-clickhouse/`](deploy/tenzir-clickhouse/).
+
+## Rules
+
+A rule owns detection semantics and output mapping, not process scheduling:
+
+```yaml
+name: local-ndjson-alert
+uid: 6722b4ed-f891-4906-a4b2-f57762dfc72b
+status: stable
+confidence: high
+enabled: true
+schedule: "5 * * * *" # deployment metadata
+queryEngine: file.ndjson
+publishers: [stdout.default]
+language: NDJSON
+query: events.ndjson
+output:
+  format: raw
+  fields: []
+```
+
+`publishers` are required: any failure makes the run fail after all required
+sinks have been attempted. `bestEffortPublishers` are attempted and recorded
+but do not fail an otherwise completed run. Exclusion paths can be relative to
+the rule file, making the same rule portable across hosts and containers.
+
+Configuration parsing is strict. Unknown keys, invalid enums, duplicate sinks,
+unsafe ClickHouse identifiers, and incomplete connector configurations are
+rejected. An active run preflights its source and required sinks before issuing
+the query; `venator validate` also checks best-effort sinks. Expansion happens
+after YAML decoding, so secret characters cannot alter the configuration
+structure.
+
+## AI review
+
+The legacy `llm` rule block now enables advisory review rather than replacing
+query results. Venator uses the official OpenAI Go SDK, the Responses API, and a
+strict structured-output schema. Evidence is JSON-encoded, capped, labeled as
+untrusted, and referenced only by stable finding ID. No tools are exposed to
+the reviewer.
+
+LLM evidence is an explicit egress boundary. Use `llm.evidenceFields` as a
+top-level allowlist and `llm.redactFields` for sensitive values. Review has its
+own timeout and reserves time for deterministic publishers.
+
+AI review is best effort by default. Set `llm.required: true` only when a
+missing annotation should make the process return non-zero after deterministic
+findings have still been delivered.
+
+## Deployment
+
+[`deploy/`](deploy/) contains runnable guidance and templates for:
+
+- local binaries and local AI-agent tools;
+- macOS launchd and Linux systemd timers;
+- Docker Compose and a ClickHouse home lab;
+- Nomad periodic batch jobs; and
+- Kubernetes CronJobs through the first-class Helm chart or plain Kustomize.
+
+The binary remains a one-shot process in every model. Schedulers own calendars,
+overlap control, deadlines, and retries; Venator owns detection, stable identity,
+delivery receipts, and truthful exit status. See the full
+[deployment guide](docs/deployment.md).
+
+## Development
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+Normal tests are hermetic. Live connector tests are opt-in and never terminate
+the test process when a local service is absent.
+
+Venator is licensed under MIT. The v0.2.0 fork keeps the original
+copyright and attribution in [`LICENSE`](LICENSE).
