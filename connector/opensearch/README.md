@@ -47,3 +47,9 @@ The template indexes stable envelope and signal fields while storing `payload`
 with mapping disabled. This preserves heterogeneous payload shapes without
 dynamic mapping conflicts or unbounded field growth. If `index` uses another
 prefix, copy the template and update `index_patterns` accordingly.
+
+For local evaluation, set `OPENSEARCH_INITIAL_ADMIN_PASSWORD` to a strong test
+password and start `docker-compose.yml`. OpenSearch listens only on loopback;
+Dashboards is available at `http://localhost:5601` with user `admin` and that
+password. The stack uses OpenSearch's demo security configuration and is not a
+production deployment.

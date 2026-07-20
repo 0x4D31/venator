@@ -97,7 +97,9 @@ jobs:
             if curl --fail --silent --insecure \
                 --user "admin:${OPENSEARCH_INITIAL_ADMIN_PASSWORD}" \
                 https://localhost:9200 >/dev/null && \
-              curl --fail --silent http://localhost:5601/api/status >/dev/null; then
+              curl --fail --silent \
+                --user "admin:${OPENSEARCH_INITIAL_ADMIN_PASSWORD}" \
+                http://localhost:5601/api/status >/dev/null; then
               ready=true
               break
             fi

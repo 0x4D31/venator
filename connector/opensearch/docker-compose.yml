@@ -14,8 +14,8 @@ services:
     ports:
       - "127.0.0.1:5601:5601"
     environment:
-      OPENSEARCH_HOSTS: "https://opensearch:9200"
-      OPENSEARCH_USERNAME: admin
-      OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?set a strong integration-test password}
+      OPENSEARCH_HOSTS: '["https://opensearch:9200"]'
+      OPENSEARCH_USERNAME: kibanaserver
+      OPENSEARCH_PASSWORD: kibanaserver
 volumes:
   opensearch-data:
