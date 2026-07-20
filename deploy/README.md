@@ -50,6 +50,10 @@ spool produced by a collector with explicit checkpoint semantics. If Tenzir
 supplies stdin, schedule a fixed wrapper pipeline and preserve both processes'
 exit statuses.
 
+The [lightweight local-detection guide](../docs/local-detection.md) explains
+finite-input semantics, continuous collector handoff, Raspberry Pi operation,
+and when Tenzir alone is the simpler design.
+
 ## Container image
 
 Release examples use `ghcr.io/0x4d31/venator:v0.2.0`. Until that image is

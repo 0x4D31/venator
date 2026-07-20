@@ -8,7 +8,7 @@ invocation runs one rule once; scheduling belongs to the caller.
 | Key | Constraint and meaning |
 | --- | --- |
 | `name` | Required, non-empty rule name. Helm additionally requires a unique DNS-1123 label of at most 52 characters. |
-| `uid` | Required, non-empty stable identity namespace. It need not be a UUID, but changing it changes finding IDs. |
+| `uid` | Required, non-empty stable identity namespace. It need not be a UUID, but changing it changes finding IDs. It must be unique among unrelated concurrently active rules. |
 | `status` | Optional lifecycle metadata copied to findings. |
 | `confidence` | Required: `unknown`, `low`, `medium`, or `high`. |
 | `enabled` | Optional boolean; defaults to `false`. A disabled direct run is skipped unless `--force` is used. |
@@ -16,6 +16,7 @@ invocation runs one rule once; scheduling belongs to the caller.
 | `queryEngine` | Required source name. Built-ins are `stdin.default` and `file.ndjson`; configured sources use `<connector>.<instance>`. |
 | `language` | Required. `stdin.default` and `file.ndjson` require `NDJSON`; BigQuery and ClickHouse require `SQL`; OpenSearch accepts `SQL` or `PPL`. |
 | `query` | Required except for `stdin.default`, where it must be empty. A relative `file.ndjson` path is resolved from the rule file's directory. |
+| `identity` | Optional finding-identity projection, described below. Omit it to hash the complete source record. |
 | `publishers` | Required-delivery sink names. Every sink is attempted; any failure makes the run fail. |
 | `bestEffortPublishers` | Best-effort sink names. Failures are reported but do not fail an otherwise successful run. At least one sink across the two publisher lists is required, and names cannot repeat. |
 | `output` | Required output contract, described below. |
@@ -29,6 +30,32 @@ connector references, local files, exclusions, and reviewer configuration
 without issuing the detection query. Connector instance keys may contain only
 ASCII letters, digits, hyphens, and underscores; dots are reserved as the
 separator in `<connector>.<instance>`.
+
+### Finding identity
+
+By default, a finding ID is derived from the rule UID and the complete source
+record. Use `identity.fields` when a producer includes volatile metadata such
+as a scan time or run ID alongside a stable event key:
+
+```yaml
+identity:
+  fields: [host_id, record_id]
+```
+
+The list must be non-empty and contain unique, non-empty names. Each name is an
+exact top-level source key; dots have no path-traversal meaning. Every selected
+key must exist on every retained record at runtime. Include a host, tenant, or
+other namespace when the event key is not globally unique.
+
+Identity is evaluated after exclusions. Different retained records in the same
+run may not share one configured identity. A collision fails before publication
+instead of making identity depend on source order. Operators must still choose
+keys that are unique across every source population and run sharing the rule
+UID. Byte-identical duplicate records remain distinct and receive stable
+occurrence IDs. Identity controls the envelope ID only; raw output still retains
+the complete record, and signal output still follows its field mapping.
+Changing the identity field set can change finding IDs and cause downstream
+redelivery.
 
 ### Output
 
@@ -137,8 +164,8 @@ any entry matches.
 Every condition requires a non-empty `field`, which names an exact top-level
 source-record key; dots have no path-traversal meaning. Scalar operators reject
 `values`, and set operators reject `value`; this prevents ambiguous or
-accidentally broad exclusions. A missing field or a value that cannot be
-represented as text does not match, including for negative operators.
+accidentally broad exclusions. A missing or null field, or a value that cannot
+be represented as text, does not match, including for negative operators.
 
 Local and non-Helm deployments may use absolute paths or paths relative to the
 rule file; the target must be a regular file, not a pipe or device. In the
@@ -155,3 +182,8 @@ interpolated; bare `$NAME` remains literal. Expansion happens after YAML
 decoding, so a secret value cannot change the YAML structure. An unset variable
 fails when that connector or reviewer is selected, without requiring variables
 for unrelated instances.
+
+YAML uses strict scalar and collection types: quote string values that YAML
+would otherwise parse as numbers or booleans. Anchors and aliases may reuse
+values, but aliases cannot be mapping keys and merge keys (`<<`) are not
+supported in global, rule, or exclusion documents.

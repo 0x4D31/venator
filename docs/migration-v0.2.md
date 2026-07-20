@@ -22,12 +22,19 @@ venator run --global-config global.yaml --rule-config rule.yaml
 
 The v0.1 form without `run` remains an alias. Add `--report-file` if automation
 needs a machine-readable run summary. A disabled rule exits zero without
-querying; use `--force` for an intentional ad-hoc run.
+querying; use `--force` for an intentional ad-hoc run. Exit code 1 means a run
+started but failed; exit code 2 means the command, configuration, preflight, or
+local rule reference was invalid. Findings on stdout remain canonical NDJSON;
+operational summaries remain on stderr.
 
 ## Configuration
 
 - Parsing is strict and validates enums, mappings, duplicate publishers, role
   configuration, durations, URLs, and ClickHouse table identifiers.
+- YAML scalar and collection types are strict; quote string-looking values such
+  as hexadecimal author names. Aliases remain valid as values but cannot be
+  mapping keys, and YAML merge keys (`<<`) are rejected in global, rule, and
+  exclusion documents; spell out the mapped keys instead.
 - Connector instance keys now accept only ASCII letters, digits, hyphens, and
   underscores; dots remain the `<connector>.<instance>` separator.
 - String values in connector instances and the global `llm` block may contain
@@ -76,6 +83,22 @@ timestamp, and preserves TTP references and typed rule-specific data. Signal
 mode is a projection: source fields that are not explicitly mapped are not
 retained in its payload. Use raw mode when the complete source record is part
 of the required evidence.
+
+Finding IDs use the complete source record by default. For scanner or collector
+records that contain a stable event key plus volatile fields, configure exact
+top-level identity fields explicitly:
+
+```yaml
+identity:
+  fields: [host_id, record_id]
+```
+
+Missing identity fields and collisions between different records in the same
+run fail before publication. This is opt-in; existing rules retain whole-record
+identity. Operators remain responsible for uniqueness across source
+populations and runs sharing a rule UID. Changing an existing rule's identity
+field set can change its finding IDs and redeliver unchanged evidence
+downstream.
 
 OpenSearch writes by stable finding ID. ClickHouse and BigQuery use documented
 canonical finding schemas. Pub/Sub message attributes include schema, finding,
@@ -128,6 +151,10 @@ and Kubernetes validates its CronJob syntax. Review the new defaults for
 `concurrencyPolicy: Forbid`, deadlines, backoff/history, non-root execution,
 read-only root filesystem, and optional Secret references. Override security
 settings only when a connector or sidecar genuinely requires it.
+
+Every packaged rule must now have a non-empty YAML string UID. The chart rejects
+duplicate UIDs among enabled rules so unrelated jobs cannot collide in
+idempotent sinks.
 
 The shipped smoke rule is disabled, so installing the chart cannot create a
 green empty-stdin CronJob by accident. Enable real rules in your rule tree.

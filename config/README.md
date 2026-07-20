@@ -15,9 +15,10 @@ helm upgrade --install venator config \
 ```
 
 Rule names used by Helm must be unique DNS-1123 labels of at most 52 characters;
-`global` is reserved for the chart's global ConfigMap. An enabled rule must have
-a non-empty string `schedule`; the chart passes that opaque value to Kubernetes
-for CronJob syntax validation.
+`global` is reserved for the chart's global ConfigMap. Every rule UID must be a
+non-empty string, and enabled rules may not share a UID. An enabled rule must
+also have a non-empty string `schedule`; the chart passes that opaque value to
+Kubernetes for CronJob syntax validation.
 
 Completed Jobs are not TTL-deleted by default; `successfulJobsHistoryLimit`
 and `failedJobsHistoryLimit` control retention. Set
@@ -65,4 +66,4 @@ unpackaged paths are rejected during rendering.
 The bundled example rule is disabled. Add or enable a real source-backed rule
 before installation; the chart intentionally does not schedule an empty-stdin
 smoke job. Rule and exclusion syntax is documented in the
-[v0.2.0 reference](../docs/rule-reference.md).
+[v0.2.0 reference](https://github.com/0x4D31/venator/blob/v0.2.0/docs/rule-reference.md).

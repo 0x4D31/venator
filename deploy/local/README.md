@@ -58,11 +58,15 @@ preserve the exit status. Use [`../launchd/`](../launchd/) on macOS or
 [`../systemd/`](../systemd/) on Linux when the operating system should own the
 schedule and retries.
 
-The sample exercises the finite `file.ndjson` source. It intentionally rereads
-the snapshot on each invocation; stable finding IDs help idempotent sinks, but
-an actively tailed file needs a collector or wrapper with explicit offset and
-retry checkpointing. The included Tenzir example watches for newly created
-spool files rather than checkpointing one continuously growing file.
+The sample exercises the finite `file.ndjson` source. It rereads the snapshot
+on every invocation. Stable finding IDs help idempotent sinks, but the source
+does not filter arbitrary raw logs or own a read offset.
+
+For continuously growing files or journald, use a checkpointing collector and
+hand Venator completed candidate batches. Do not use `tail -F | venator`:
+publication waits for EOF, and a row, byte, or time limit may be reached first.
+The [lightweight local-detection guide](../../docs/local-detection.md) covers
+durable spool handoff, Tenzir's role, and 64-bit Raspberry Pi deployments.
 
 ## Credentials
 

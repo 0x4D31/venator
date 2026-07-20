@@ -1,12 +1,22 @@
 # Tenzir integration
 
-Tenzir is an optional collection and shaping layer, not a Venator dependency or
-scheduler. There are two clean boundaries.
+Tenzir is an optional collection and shaping layer, not a Venator dependency.
+It does not schedule Venator in these examples: an external scheduler invokes
+each bounded Venator run. There are two clean boundaries.
+
+## When Tenzir alone is enough
+
+Tenzir already supports acquisition, parsing, filtering, Sigma evaluation,
+windowing, scheduling, and HTTP output. If those operators implement the whole
+detection and delivery path, adding Venator is unnecessary. Use Venator when
+you also need its canonical finding identity, independent rule-run contract,
+required and best-effort sink fan-out, receipts, or scheduler-facing exit
+status.
 
 ## Direct NDJSON boundary
 
-For light local detection, let Tenzir read/filter a file and write bounded
-NDJSON directly to Venator's built-in stdin source:
+For light local detection over a completed input, let Tenzir read and filter a
+file and write bounded NDJSON directly to Venator's built-in stdin source:
 
 ```sh
 set -o pipefail # bash/zsh: preserve both Tenzir and Venator failures
@@ -18,6 +28,13 @@ venator run \
   --rule-config config/rules/example/single-stage-alert.yaml \
   --force
 ```
+
+This pipeline must reach EOF. Venator is not consuming a permanent Tenzir
+stream: it publishes only after the bounded producer finishes. Preserve the
+pipeline status so a failure in either process reaches the scheduler. A direct
+pipe cannot roll back records already published if Tenzir emits partial output
+and then fails; stage and validate the producer output first when successful
+producer completion must be atomic with publication.
 
 Venator writes canonical finding NDJSON to stdout in this example. The query is
 one Tenzir argument; Venator deliberately does not expose a rule-defined shell
@@ -57,7 +74,7 @@ policy and monitor ingestion failures. Tenzir's `from_file` also supports
 `remove` or `rename` after a file is read when that lifecycle fits your policy.
 In another terminal, run the detector. The fixture uses fixed timestamps for
 reproducibility, so update them or append current events to satisfy the sample
-rule's 15-minute window:
+rule's overlapping 20-minute window:
 
 ```sh
 export CLICKHOUSE_PASSWORD='replace-me'

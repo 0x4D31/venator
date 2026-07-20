@@ -5,6 +5,13 @@ A BigQuery instance is always a SQL source. Adding both `datasetID` and
 `maxBytesBilled` to every query (default 10 GiB), plus the global row and
 encoded-result byte caps.
 
+`language: SQL` describes the rule text; it is not a SQL sandbox. For a
+source-only rule, grant the runtime identity only `roles/bigquery.jobUser` on
+the project and `roles/bigquery.dataViewer` on the source dataset. Grant
+`roles/bigquery.dataEditor` only on a destination dataset when the same process
+uses a BigQuery sink. IAM, not SQL prefix inspection, is the authoritative
+write boundary.
+
 ```yaml
 bigquery:
   instances:

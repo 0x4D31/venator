@@ -5,9 +5,9 @@
 # Venator
 
 Venator is a scheduler-neutral batch detection engine. One invocation runs one
-versioned rule, turns typed query results into one canonical finding model,
-hands those findings to the configured sinks, and exits with an honest status
-code. Archival sinks retain the envelope; human-notification sinks may render a
+rule, turns typed query results into one versioned canonical finding model,
+hands those findings to the configured sinks, and reports success or failure.
+Archival sinks retain the envelope; human-notification sinks may render a
 bounded projection.
 
 It is intentionally not a SIEM, log shipper, or required Kubernetes service.
@@ -17,7 +17,7 @@ Kubernetes CronJob. The original design motivation is described in
 
 ## Why Venator
 
-Venator gives each detection a strict, versioned, one-shot execution contract:
+Venator gives each detection a strict one-shot execution contract:
 typed input, exclusions, stable finding identity, explicit delivery semantics,
 and a truthful exit status. When each rule is scheduled as its own job, the
 scheduler also gives it independent logs, history, retries, and manual reruns.
@@ -47,7 +47,8 @@ failure cannot silently erase a detection.
 
 Every finding includes:
 
-- a stable SHA-256 ID derived from the rule UID and source evidence;
+- a stable SHA-256 ID derived from the rule UID and either the complete source
+  evidence or an explicit identity projection;
 - a per-execution run ID and timestamps;
 - rule, source, confidence, tag, and ATT&CK metadata;
 - commonly queried signal attributes when mapped; and
@@ -78,10 +79,20 @@ agent pipelines. Logs go to stderr, so stdout stays machine-readable. Legacy
 v0.1 flags without the `run` subcommand remain an alias during migration.
 
 Use `--report-file run.json` for an atomic JSON run report. Exit status is zero
-for a completed run (including no findings or a disabled rule) and non-zero for
-configuration, source, required-sink, timeout, or cancellation failures.
-`runtime.maxRecords` and `runtime.maxBytes` bound materialized results and
-canonical output before sink fan-out.
+for a completed run (including no findings or a disabled rule), one for an
+execution, timeout, cancellation, required-delivery, connector-close, or
+report-write failure, and two for invalid arguments, configuration, connector
+preflight, or local rule references. Finding count never changes the status,
+and a skipped rule is not an acknowledgement of input. `runtime.maxRecords`
+and `runtime.maxBytes` bound materialized results and canonical output before
+sink fan-out.
+
+File and stdin inputs are finite candidate sets, not tailers or a general
+matching language. Use Tenzir or DuckDB to filter bounded files. Use Fluent Bit
+or Vector when growing files or journald require durable cursors and buffering;
+Tenzir fits parsing, Sigma evaluation, windowing, and completed spools. See
+[lightweight local detection](docs/local-detection.md) for local boundaries and
+home-lab patterns.
 
 ## Sources and sinks
 
@@ -94,12 +105,17 @@ canonical output before sink fan-out.
 | [BigQuery](connector/bigquery/) | yes | yes | Typed query values; sink role requires dataset and table |
 | [Pub/Sub](connector/pubsub/) | no | yes | Canonical finding messages with serialization and publish failures surfaced |
 | [Slack](connector/slack/) | no | yes | Bounded human-readable notifications; intentionally lossy |
+| [Generic webhook](connector/webhook/) | no | yes | Canonical finding delivery with optional Standard Webhooks signing |
 
 ClickHouse configuration and a home-lab Compose stack are in
 [`connector/clickhouse/`](connector/clickhouse/) and
-[`deploy/clickhouse/`](deploy/clickhouse/). Tenzir can either stream filtered
-NDJSON directly into Venator or collect into ClickHouse; see
+[`deploy/clickhouse/`](deploy/clickhouse/). Tenzir can either pipe a bounded
+filtered NDJSON batch into Venator or collect into ClickHouse; see
 [`deploy/tenzir-clickhouse/`](deploy/tenzir-clickhouse/).
+
+If a Tenzir pipeline already provides the complete detection and delivery
+behavior you need, use it alone. Venator adds value when finding identity, rule
+isolation, sink fan-out, receipts, and a scheduler-facing exit contract matter.
 
 ## Rules
 
@@ -126,6 +142,9 @@ fail after all required sinks have been attempted. `bestEffortPublishers` are
 attempted and recorded but do not fail an otherwise completed run. At least one
 sink across the two lists is required. Exclusion paths can be relative to the
 rule file outside Helm; chart-managed rules use packaged exclusion paths.
+When `identity.fields` is omitted, the complete source record determines the
+finding ID. Configure exact top-level stable keys when producer timestamps or
+run metadata should not change detection identity.
 
 Configuration parsing is strict. Unknown keys, invalid enums, duplicate sinks,
 unsafe ClickHouse identifiers, and incomplete connector configurations are
@@ -166,7 +185,7 @@ findings have still been delivered. A concise local rule is available in
 
 The binary remains a one-shot process in every model. Schedulers own calendars,
 overlap control, deadlines, and retries; Venator owns detection, stable identity,
-delivery receipts, and truthful exit status. See the full
+delivery receipts, and the run result. See the full
 [deployment guide](docs/deployment.md).
 
 ## Development

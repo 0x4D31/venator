@@ -27,6 +27,9 @@ Deployment templates live in [`deploy/`](../deploy/):
 | [ClickHouse](../deploy/clickhouse/) | Retained home-lab telemetry and findings | Any host scheduler |
 | [Tenzir](../deploy/tenzir-clickhouse/) | Local collection and shaping | Tenzir plus any scheduler |
 
+For finite-input, durable-spool, Raspberry Pi, and agent-handoff patterns, see
+[lightweight local detection](local-detection.md).
+
 ## 1. Prepare configuration
 
 The binary accepts the same scheduler-neutral arguments everywhere:

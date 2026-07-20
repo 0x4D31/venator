@@ -6,7 +6,12 @@ protocol. The source executes the rule's SQL with a deadline, asks ClickHouse
 to throw at `max_result_rows`, and independently enforces the same row cap in
 the client. `max_result_bytes` and the client-side `query.maxBytes` provide the
 corresponding byte boundary; connector limits cannot exceed the global runtime
-limits.
+limits. Rule SQL is trusted operator input, so use a source identity with
+`SELECT`-only grants as the authoritative control. The connector sets query
+result limits but does not attempt to classify or sandbox SQL. If the account
+profile uses ClickHouse `readonly=1`, it must permit those result-limit setting
+overrides. In production, configure separate source and sink instances instead
+of giving a query identity write access.
 
 The sink writes searchable scalar fields plus the complete canonical finding
 JSON in `payload`. Apply [`schema.sql`](schema.sql), then configure `sink.table`

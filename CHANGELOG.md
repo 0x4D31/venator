@@ -15,11 +15,20 @@ first-class workflow.
   native or HTTP protocols, and batch finding inserts.
 - Built-in NDJSON stdin, finite-file source, and stdout sink for local agents,
   workstation snapshots, and Tenzir.
+- Optional exact-field identity projections for producers whose records contain
+  stable event keys alongside volatile scan or run metadata.
+- Generic webhook delivery of canonical findings, with optional Standard
+  Webhooks signing, for automation and asynchronous investigation handoff.
 - Advisory structured AI review using the official OpenAI Go SDK and Responses
   API; AI can annotate but cannot replace or suppress findings.
-- `run`, `validate`, and `version` commands; legacy v0.1 flags remain accepted.
+- `run`, `validate`, and `version` commands with command-specific help,
+  human-readable run outcomes on stderr, finding-only stdout, and documented
+  scheduler-safe exit codes; legacy v0.1 flags remain accepted.
 - Deployment assets for Helm/GKE, plain Kubernetes, launchd, systemd, Nomad,
   Docker Compose, local agents, ClickHouse, and Tenzir.
+- Lightweight local-detection guidance for finite inputs, collector
+  checkpoints, durable spool handoff, Raspberry Pi deployments, and the cases
+  where Tenzir alone is the smaller solution.
 - Hermetic connector regression tests and GitHub CI for tests, race detection,
   vet, static analysis, vulnerability scanning, static/container builds, Helm,
   and Kustomize rendering.
@@ -40,9 +49,14 @@ first-class workflow.
 - Slack uses context-aware bounded HTTP and renders an intentionally lossy,
   human-readable finding summary with `plain_text` Block Kit.
 - BigQuery uses stable insert IDs and a configurable bytes-billed ceiling;
-  OpenSearch bulk delivery is bounded and chunked.
-- Rule and exclusion YAML enforce scalar and top-level collection types;
-  `and`/`or` ambiguity is rejected, and regular expressions are compiled once.
+  OpenSearch bulk delivery is bounded and chunked; ClickHouse queries have
+  independent server and client result limits and require least-privilege
+  credentials as their authorization boundary.
+- Global, rule, and exclusion YAML reject implicit scalar coercion, aliases in
+  mapping keys, and merge keys; `and`/`or` ambiguity is rejected, and regular
+  expressions are compiled once.
+- Null source values no longer compare equal to empty strings in exclusions or
+  satisfy negative text operators.
 - Environment references are decoded safely and resolved only for selected
   connectors; literal dollar signs in credentials are preserved, and the
   Docker builder never copies runtime configuration or secrets.
@@ -56,7 +70,9 @@ first-class workflow.
   global or per-rule certificate mounts without changing the rule-per-CronJob
   operating model. Invalid rule types, unknown rule-scoped value keys,
   duplicate or reserved names, and mounts that shadow Venator-managed paths
-  fail chart rendering instead of creating broken or colliding resources.
+  fail chart rendering instead of creating invalid or colliding resources.
+- Helm rejects empty or non-string rule UIDs and duplicate UIDs among enabled
+  rules before unrelated detections can collide in idempotent sinks.
 
 ### Changed
 
