@@ -18,23 +18,23 @@ type Signal struct {
 	RuleName         string         `json:"rule_name"`
 	ConfidenceID     int            `json:"confidence_id"`
 	Confidence       string         `json:"confidence"`
-	TTPs             []TTP          `json:"ttps"`
-	Actor            Actor          `json:"actor"`
-	Resource         Resource       `json:"resource"`
-	SrcEndpoint      Endpoint       `json:"src_endpoint"`
-	DstEndpoint      Endpoint       `json:"dst_endpoint"`
-	Message          string         `json:"message"`
-	Metadata         Metadata       `json:"metadata"`
+	TTPs             []TTP          `json:"ttps,omitempty"`
+	Actor            Actor          `json:"actor,omitzero"`
+	Resource         Resource       `json:"resource,omitzero"`
+	SrcEndpoint      Endpoint       `json:"src_endpoint,omitzero"`
+	DstEndpoint      Endpoint       `json:"dst_endpoint,omitzero"`
+	Message          string         `json:"message,omitempty"`
+	Metadata         Metadata       `json:"metadata,omitzero"`
 	RuleSpecificData map[string]any `json:"rule_specific_data,omitempty"`
 }
 
 // TTP identifies a technique or tactic attached to the rule.
 type TTP struct {
-	Framework string `json:"framework"`
-	Tactic    string `json:"tactic"`
-	Name      string `json:"name"`
-	ID        string `json:"id"`
-	Reference string `json:"reference"`
+	Framework string `json:"framework,omitempty"`
+	Tactic    string `json:"tactic,omitempty"`
+	Name      string `json:"name,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Reference string `json:"reference,omitempty"`
 }
 
 type Actor struct {
@@ -42,27 +42,27 @@ type Actor struct {
 }
 
 type User struct {
-	Name string `json:"name"`
-	UID  string `json:"uid"`
+	Name string `json:"name,omitempty"`
+	UID  string `json:"uid,omitempty"`
 }
 
 // Resource identifies the target of the activity.
 type Resource struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-	UID  string `json:"uid"`
+	Name string `json:"name,omitempty"`
+	Type string `json:"type,omitempty"`
+	UID  string `json:"uid,omitempty"`
 }
 
 // Endpoint represents a network endpoint.
 type Endpoint struct {
-	Hostname string `json:"hostname"`
-	IP       string `json:"ip"`
+	Hostname string `json:"hostname,omitempty"`
+	IP       string `json:"ip,omitempty"`
 }
 
 // Metadata contains event identifiers.
 type Metadata struct {
-	EventID    string `json:"event_id"`
-	EventIndex string `json:"event_index"`
+	EventID    string `json:"event_id,omitempty"`
+	EventIndex string `json:"event_index,omitempty"`
 }
 
 const (
@@ -78,7 +78,6 @@ func BuildSignal(result model.Record, cfg *config.RuleConfig) (*Signal, error) {
 		RuleName:     cfg.Name,
 		ConfidenceID: getConfidenceID(cfg.Confidence),
 		Confidence:   string(cfg.Confidence),
-		TTPs:         make([]TTP, 0, len(cfg.TTPs)),
 	}
 	for _, ttp := range cfg.TTPs {
 		signal.TTPs = append(signal.TTPs, TTP{

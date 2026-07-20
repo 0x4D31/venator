@@ -34,7 +34,8 @@ automation can invoke one rule and act on the same output and exit status.
 flowchart LR
   A["External scheduler"] --> V["Venator one-shot run"]
   V --> S["Typed source"]
-  S --> E["Exclusions + deterministic envelope"]
+  S --> F["Optional local CEL expression"]
+  F --> E["Exclusions + deterministic envelope"]
   E --> R["Optional advisory AI review"]
   R --> P["Required and best-effort sinks"]
   P --> X["Run report + exit code"]
@@ -53,7 +54,7 @@ Every finding includes:
 - rule, source, confidence, tag, and ATT&CK metadata;
 - commonly queried signal attributes when mapped; and
 - a payload containing the complete typed source record in raw mode, or only
-  the selected normalized fields in signal mode.
+  a normalized signal built from explicitly selected source fields.
 
 ## Quick start without a SIEM
 
@@ -73,11 +74,11 @@ go build -trimpath -o venator .
 ```
 
 The example needs no credentials or external service. It reads a finite NDJSON
-snapshot through `file.ndjson` and emits canonical finding NDJSON through
-`stdout.default`. A separate `stdin.default` source accepts bounded output from
-scanners, query tools, and agent pipelines. Logs go to stderr, so stdout stays
-machine-readable. Legacy v0.1 flags without the `run` subcommand remain an
-alias during migration.
+event snapshot through `file.ndjson`, selects failed logins, and emits
+canonical finding NDJSON through `stdout.default`. A separate `stdin.default`
+source accepts bounded output from scanners, query tools, and agent pipelines.
+Logs go to stderr, so stdout stays machine-readable. Legacy v0.1 flags without
+the `run` subcommand remain an alias during migration.
 
 Use `--report-file run.json` for an atomic JSON run report. Exit status is zero
 for a completed run (including no findings or a disabled rule), one for an
@@ -86,22 +87,23 @@ report-write failure, and two for invalid arguments, configuration, connector
 preflight, or local rule references. Finding count never changes the status,
 and a skipped rule is not an acknowledgement of input. `runtime.maxRecords`
 and `runtime.maxBytes` bound materialized results and canonical output before
-sink fan-out.
+sink fan-out. Reports and completion logs expose `queried`, `matched`,
+`excluded`, and final `findings` counts.
 
-File and stdin inputs are finite candidate sets, not tailers or a general
-matching language. Use an external query or filtering tool to select candidates
-from completed files. Growing files and journald need a collector that owns
-durable cursors, rotation handling, buffering, and backpressure. Keep parsing,
-correlation, and windowing upstream, then give Venator a completed batch or a
-bounded query. See [lightweight local detection](docs/local-detection.md) for
-local boundaries and home-lab patterns.
+File and stdin inputs accept finite event or candidate batches. An optional,
+bounded CEL `expr` makes a boolean decision for each event; omitting it means
+every input event is already a candidate. Venator does not tail files, parse
+arbitrary log formats, correlate across records, or maintain windows. Growing
+files and journald need a collector that owns durable cursors, rotation,
+buffering, and backpressure. See
+[lightweight local detection](docs/local-detection.md) for the exact boundary.
 
 ## Sources and sinks
 
 | Connector | Source | Sink | Notes |
 | --- | ---: | ---: | --- |
-| [stdin/stdout NDJSON](connector/stdio/) | yes | yes | Built in; interoperates with bounded producers, agents, and pipelines |
-| [finite NDJSON file](connector/stdio/) | yes | no | `file.ndjson`; rule-relative path, no hidden checkpoint state |
+| [stdin/stdout NDJSON](connector/stdio/) | yes | yes | Built in; optional per-event CEL expression; bounded producers and agents |
+| [finite NDJSON file](connector/stdio/) | yes | no | Optional per-event CEL expression; rule-relative path, no hidden checkpoint state |
 | [ClickHouse](connector/clickhouse/) | yes | yes | Official Go driver, native/HTTP, typed rows, bounded queries, batch writes |
 | [OpenSearch](connector/opensearch/) | yes | yes | Bounded SQL/PPL queries and idempotent bulk finding writes |
 | [BigQuery](connector/bigquery/) | yes | yes | Typed query values; sink role requires dataset and table |
@@ -129,11 +131,19 @@ schedule: "5 * * * *" # deployment metadata
 queryEngine: file.ndjson
 publishers: [stdout.default]
 language: NDJSON
-query: events.ndjson
+query: ./events.ndjson
+expr: |
+  event.kind == "failed_login" &&
+  has(event.source_ip)
 output:
   format: raw
-  fields: []
 ```
+
+For `file.ndjson`, `query` is the path to a completed event snapshot and is
+resolved relative to the rule YAML. `expr` is an optional CEL boolean over the
+current `event`; it is supported only by the two local NDJSON sources.
+Database and search sources express selection in SQL or PPL. Raw output does
+not define `fields`; signal output requires explicit field mappings.
 
 Entries in `publishers` are required-delivery sinks: any failure makes the run
 fail after all required sinks have been attempted. `bestEffortPublishers` are

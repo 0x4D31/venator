@@ -6,17 +6,17 @@ enabled: true
 queryEngine: file.ndjson
 publishers: [stdout.default]
 language: NDJSON
-query: events.ndjson
+query: ./events.ndjson
+expr: event.severity >= 5
 output:
   format: raw
-  fields: []
-description: Apply advisory review to the bundled finite NDJSON example.
+description: Detect and review high-severity events in the bundled snapshot.
 tags: [example, local, llm]
 author: "0x4D31"
 llm:
   enabled: true
   required: false
   maxFindings: 25
-  evidenceFields: [timestamp, host, user, event, severity]
+  evidenceFields: [timestamp, host, user, kind, severity]
   redactFields: [user]
   prompt: Assess whether each supplied security finding deserves analyst attention based only on the supplied evidence.

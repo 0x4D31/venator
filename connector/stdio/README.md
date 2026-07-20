@@ -6,6 +6,13 @@ are ignored, and each non-empty line must contain exactly one JSON object.
 `stdout.default` writes one complete canonical finding per line. Operational
 logs remain on stderr, so stdout can be piped into another program.
 
+For these two sources only, a rule may define a bounded CEL `expr` over the
+current JSON object as `event`. Matching events continue to exclusions and
+finding construction. Omit `expr` when every input object is already a
+candidate. The expression is per-event; parsing, transforms, correlation, and
+windows remain upstream. See the
+[rule reference](../../docs/rule-reference.md#local-ndjson-expression).
+
 Every input record is limited to 4 MiB, excluding its newline delimiter. This
 per-record safety limit is fixed and independent of `runtime.maxBytes`, which
 bounds the aggregate input and materialized output of a run.
@@ -19,7 +26,7 @@ an unclosed pipe reaches a row, byte, or time limit without becoming a live
 detector. Use it with a bounded producer command whose exit status the caller
 preserves.
 
-`file.ndjson` accepts only regular files; point it at a completed snapshot. It
-reads from the beginning on every invocation and does not tail, checkpoint, or
-wait for appended data. For continuously growing logs, use a collector with
-explicit rotation, offset, buffering, and retry semantics.
+`file.ndjson` accepts only regular files; point it at a completed event or
+candidate batch. It reads from the beginning on every invocation and does not
+tail, checkpoint, or wait for appended data. For continuously growing logs,
+use a collector with explicit rotation, offset, buffering, and retry semantics.

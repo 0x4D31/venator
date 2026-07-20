@@ -21,6 +21,8 @@ const (
 	nonExistentGlobalConfigPath = "non_existent_global_file.yaml"
 )
 
+func stringPointer(value string) *string { return &value }
+
 func TestParseRuleConfig(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -397,6 +399,8 @@ func TestParseRuleConfigRejectsInvalidControlFieldTypes(t *testing.T) {
 		{name: "numeric name", old: "name: test-rule", replacement: "name: 123", want: "name must be a YAML string"},
 		{name: "numeric uid", old: "uid: 2001416b-bdd3-4a31-af52-3b1933c4f926", replacement: "uid: 123", want: "uid must be a YAML string"},
 		{name: "boolean exclusions path", old: "exclusionsPath: test-exclusions.yaml", replacement: "exclusionsPath: true", want: "exclusionsPath must be a YAML string"},
+		{name: "null expression", old: "language: SQL", replacement: "expr: null\nlanguage: SQL", want: "expr must not be null"},
+		{name: "boolean expression", old: "language: SQL", replacement: "expr: true\nlanguage: SQL", want: "expr must be a YAML string"},
 		{name: "null schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: null", want: "schedule must be a YAML string"},
 		{name: "numeric schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: 5", want: "schedule must be a YAML string"},
 		{name: "boolean schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: true", want: "schedule must be a YAML string"},
@@ -640,6 +644,41 @@ func TestRuleConfigValidatesBuiltInSourceLanguages(t *testing.T) {
 			}
 			if tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)) {
 				t.Fatalf("error = %v, want substring %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestRuleConfigValidatesLocalNDJSONExpression(t *testing.T) {
+	tests := []struct {
+		name        string
+		queryEngine string
+		language    string
+		query       string
+		expr        *string
+		wantError   string
+	}{
+		{name: "omitted", queryEngine: "stdin.default", language: "NDJSON"},
+		{name: "stdin", queryEngine: "stdin.default", language: "NDJSON", expr: stringPointer(`event.severity >= 4`)},
+		{name: "file", queryEngine: "file.ndjson", language: "NDJSON", query: "events.ndjson", expr: stringPointer(`has(event.kind)`)},
+		{name: "empty expression", queryEngine: "stdin.default", language: "NDJSON", expr: stringPointer(" \n\t"), wantError: "expr cannot be empty"},
+		{name: "invalid expression", queryEngine: "stdin.default", language: "NDJSON", expr: stringPointer(`event.kind ==`), wantError: "invalid expr"},
+		{name: "non-boolean expression", queryEngine: "stdin.default", language: "NDJSON", expr: stringPointer(`event.kind`), wantError: "must return bool"},
+		{name: "remote source", queryEngine: "clickhouse.logs", language: "SQL", query: "SELECT 1", expr: stringPointer(`true`), wantError: "supported only"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule := *makeRuleConfig()
+			rule.QueryEngine = test.queryEngine
+			rule.Language = test.language
+			rule.Query = test.query
+			rule.Expr = test.expr
+			err := rule.Validate()
+			if test.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, test.wantError)
 			}
 		})
 	}

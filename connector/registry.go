@@ -437,11 +437,6 @@ func (r *Registry) closeFailedInitialization(role, name string, value any, initi
 	return initializationErr
 }
 
-// ValidateReferences checks connector names and roles without resolving secrets.
-func (r *Registry) ValidateReferences(rule *config.RuleConfig) error {
-	return r.validateReferences(rule, true)
-}
-
 func (r *Registry) validateReferences(rule *config.RuleConfig, includeBestEffort bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -1,9 +1,9 @@
 # Plain Kubernetes CronJob
 
-This Kubernetes 1.27+ deployment is a scheduler-neutral alternative to the Helm chart. The
-checked-in Kustomization generates a global ConfigMap and a rule ConfigMap
-containing a finite NDJSON smoke event. It optionally imports every key from
-the `venator-secrets` Secret as an environment variable.
+This Kubernetes 1.27+ deployment is a scheduler-neutral alternative to the
+Helm chart. The checked-in Kustomization generates a global ConfigMap and a
+rule ConfigMap containing a finite NDJSON event batch. It optionally
+imports every key from the `venator-secrets` Secret as an environment variable.
 
 Render or apply the runnable sample directly:
 

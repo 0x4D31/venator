@@ -1,5 +1,5 @@
-# Minimal local configuration. stdin.default, file.ndjson, and stdout.default are built in,
-# so this file works without a SIEM, cloud account, or credentials.
+# Minimal local configuration. stdin.default, file.ndjson, and stdout.default
+# are built in, so this works without a SIEM, cloud account, or credentials.
 runtime:
   maxRecords: 1000
   maxBytes: 16777216

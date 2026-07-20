@@ -26,8 +26,6 @@ var version = "0.2.0"
 
 var logger = logrus.StandardLogger()
 
-const defaultGlobalConfigPath = "config/files/global_config.yaml"
-
 func main() { os.Exit(realMain(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 func realMain(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -114,8 +112,8 @@ func parseOptions(arguments []string, includeRunOptions bool) (*commandOptions, 
 	opts := &commandOptions{}
 	fs.StringVar(&opts.rulePath, "rule-config", "", "path to the rule YAML")
 	fs.StringVar(&opts.rulePath, "r", "", "path to the rule YAML")
-	fs.StringVar(&opts.globalPath, "global-config", defaultGlobalConfigPath, "path to the global YAML")
-	fs.StringVar(&opts.globalPath, "c", defaultGlobalConfigPath, "path to the global YAML")
+	fs.StringVar(&opts.globalPath, "global-config", "", "path to the global YAML")
+	fs.StringVar(&opts.globalPath, "c", "", "path to the global YAML")
 	if includeRunOptions {
 		fs.StringVar(&opts.logLevel, "log-level", "info", "trace, debug, info, warn, error")
 		fs.StringVar(&opts.logLevel, "l", "info", "trace, debug, info, warn, error")
@@ -130,6 +128,9 @@ func parseOptions(arguments []string, includeRunOptions bool) (*commandOptions, 
 	}
 	if opts.rulePath == "" {
 		return nil, fmt.Errorf("--rule-config is required")
+	}
+	if opts.globalPath == "" {
+		return nil, fmt.Errorf("--global-config is required")
 	}
 	return opts, nil
 }
@@ -234,7 +235,7 @@ func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) i
 	}
 	fields := logrus.Fields{
 		"rule_name": report.RuleName, "rule_id": report.RuleID, "run_id": report.RunID,
-		"status": report.Status, "queried": report.Queried, "excluded": report.Excluded,
+		"status": report.Status, "queried": report.Queried, "matched": report.Matched, "excluded": report.Excluded,
 		"findings": report.Findings, "sinks_attempted": len(report.Sinks), "warnings": warnings,
 		"duration_ms": report.FinishedAt.Sub(report.StartedAt).Milliseconds(),
 	}
@@ -376,8 +377,8 @@ func writeReport(path string, report model.RunReport) error {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  venator run --rule-config RULE.yaml [--global-config GLOBAL.yaml]")
-	fmt.Fprintln(w, "  venator validate --rule-config RULE.yaml [--global-config GLOBAL.yaml]")
+	fmt.Fprintln(w, "  venator run --global-config GLOBAL.yaml --rule-config RULE.yaml")
+	fmt.Fprintln(w, "  venator validate --global-config GLOBAL.yaml --rule-config RULE.yaml")
 	fmt.Fprintln(w, "  venator version")
 	fmt.Fprintln(w, "\nRun 'venator help <command>' for command options.")
 	fmt.Fprintln(w, "Legacy v0.1 flags without the 'run' command remain supported.")
@@ -387,20 +388,20 @@ func printCommandUsage(w io.Writer, command string) {
 	switch command {
 	case "run":
 		fmt.Fprintln(w, "usage:")
-		fmt.Fprintln(w, "  venator run --rule-config RULE.yaml [options]")
+		fmt.Fprintln(w, "  venator run --global-config GLOBAL.yaml --rule-config RULE.yaml [options]")
 		fmt.Fprintln(w, "\noptions:")
-		fmt.Fprintln(w, "  -r, --rule-config PATH     rule YAML (required)")
-		fmt.Fprintf(w, "  -c, --global-config PATH   global YAML (default %s)\n", defaultGlobalConfigPath)
+		fmt.Fprintln(w, "  -r, --rule-config FILE     one rule YAML (required)")
+		fmt.Fprintln(w, "  -c, --global-config FILE   global connector/runtime YAML (required)")
 		fmt.Fprintln(w, "  -l, --log-level LEVEL      trace, debug, info, warn, or error (default info)")
 		fmt.Fprintln(w, "      --report-file PATH     atomically write the JSON run report")
 		fmt.Fprintln(w, "      --force                run a disabled rule")
 		fmt.Fprintln(w, "  -h, --help                 show this help")
 	case "validate":
 		fmt.Fprintln(w, "usage:")
-		fmt.Fprintln(w, "  venator validate --rule-config RULE.yaml [options]")
+		fmt.Fprintln(w, "  venator validate --global-config GLOBAL.yaml --rule-config RULE.yaml")
 		fmt.Fprintln(w, "\noptions:")
-		fmt.Fprintln(w, "  -r, --rule-config PATH     rule YAML (required)")
-		fmt.Fprintf(w, "  -c, --global-config PATH   global YAML (default %s)\n", defaultGlobalConfigPath)
+		fmt.Fprintln(w, "  -r, --rule-config FILE     one rule YAML (required)")
+		fmt.Fprintln(w, "  -c, --global-config FILE   global connector/runtime YAML (required)")
 		fmt.Fprintln(w, "  -h, --help                 show this help")
 	case "version":
 		fmt.Fprintln(w, "usage:")

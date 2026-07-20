@@ -20,12 +20,15 @@ The preferred command is:
 venator run --global-config global.yaml --rule-config rule.yaml
 ```
 
-The v0.1 form without `run` remains an alias. Add `--report-file` if automation
-needs a machine-readable run summary. A disabled rule exits zero without
-querying; use `--force` for an intentional ad-hoc run. Exit code 1 means a run
-started but failed; exit code 2 means the command, configuration, preflight, or
-local rule reference was invalid. Findings on stdout remain canonical NDJSON;
-operational summaries remain on stderr.
+The v0.1 form without `run` remains an alias. Both configuration paths are now
+explicitly required; there is no working-directory-dependent default for the
+global file. Add `--report-file` if automation needs a machine-readable run
+summary. A disabled rule exits zero without querying; use `--force` for an
+intentional ad-hoc run. Exit code 1 means a run started but failed; exit code 2
+means the command, configuration, preflight, or local rule reference was
+invalid. Findings on stdout remain canonical NDJSON; operational summaries
+remain on stderr. JSON run reports distinguish source `queried`, CEL `matched`,
+exclusion `excluded`, and final `findings` counts.
 
 ## Configuration
 
@@ -44,6 +47,10 @@ operational summaries remain on stderr.
   remains literal.
 - `runtime.maxBytes` defaults to 64 MiB alongside `runtime.maxRecords`; tune
   both for the scheduler memory limit and expected result shape.
+- `stdin.default` and `file.ndjson` rules may define a CEL boolean `expr` over
+  the current JSON object as `event`. Omit it for preselected candidates. It is
+  invalid on database and search sources, where SQL or PPL remains the
+  detection expression.
 - `exclusionsPath` may be relative to the rule file for local deployments. Helm
   requires exactly `/app/exclusion/<file>.yaml`, where the file is packaged
   directly under `config/exclusions/`, and mounts it only for rules that
@@ -78,8 +85,8 @@ All publishers now receive a `venator.finding/v1` envelope rather than a mix of
 raw maps and independently built signals. Update downstream schemas and parsers
 for `id`, `run_id`, `detected_at`, `source`, `rule`, `attributes`, and `payload`.
 `attributes` is omitted for raw findings without normalized signal fields. The
-signal payload corrects `confidenceid` to `confidence_id`, omits an unmapped
-timestamp, and preserves TTP references and typed rule-specific data. Signal
+signal payload corrects `confidenceid` to `confidence_id`, omits unmapped
+fields, and preserves TTP references and typed rule-specific data. Signal
 mode is a projection: source fields that are not explicitly mapped are not
 retained in its payload. Use raw mode when the complete source record is part
 of the required evidence.

@@ -1,2 +1,2 @@
-{"timestamp":"2026-07-18T12:00:00Z","event":"failed_login","user":"alice","source_ip":"203.0.113.10"}
-{"timestamp":"2026-07-18T12:01:00Z","event":"privilege_change","user":"bob","role":"admin"}
+{"timestamp":"2026-07-18T12:00:00Z","kind":"failed_login","user":"alice","source_ip":"203.0.113.10"}
+{"timestamp":"2026-07-18T12:01:00Z","kind":"privilege_change","user":"bob","role":"admin"}

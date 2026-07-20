@@ -47,6 +47,8 @@ interval.
 
 The plist sets umask `077`, and the install steps make the log directory private
 before launchd opens stdout/stderr. The sample rule reads the finite
-`events.ndjson` file beside it, so a scheduled run exercises detection instead
-of succeeding on empty stdin. A continuously growing production log needs a
-collector with explicit offset and retry semantics.
+`events.ndjson` file beside it, so a scheduled run exercises the complete
+run and delivery path instead of succeeding on empty stdin. A continuously
+growing production log needs a collector with explicit offset and retry
+semantics. Rotate or ship the configured stdout and stderr files; launchd does
+not manage their retention.

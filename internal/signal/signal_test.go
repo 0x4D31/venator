@@ -65,7 +65,6 @@ func TestBuildSignal(t *testing.T) {
 				Timestamp: time.Date(2023, 5, 14, 10, 0, 0, 0, time.UTC),
 				RuleID:    cfg.UID,
 				RuleName:  cfg.Name,
-				TTPs:      []signal.TTP{},
 				Message:   "process xyz created/modified the file abc",
 				Resource:  signal.Resource{Name: "hostname123", Type: "", UID: ""},
 				Actor: signal.Actor{
@@ -96,7 +95,6 @@ func TestBuildSignal(t *testing.T) {
 				Timestamp: time.Date(2023, 5, 14, 10, 0, 0, 0, time.UTC),
 				RuleID:    cfg.UID,
 				RuleName:  cfg.Name,
-				TTPs:      []signal.TTP{},
 				Message:   "process xyz created/modified the file abc",
 				Resource:  signal.Resource{Name: "hostname123", Type: "", UID: ""},
 				Actor: signal.Actor{
@@ -247,12 +245,29 @@ func TestBuildSignalAcceptsTypedJSONObject(t *testing.T) {
 	}
 }
 
-func TestSignalOmitsUnmappedTimestamp(t *testing.T) {
-	encoded, err := json.Marshal(signal.Signal{RuleID: "rule-1"})
+func TestSignalJSONOmitsUnmappedFields(t *testing.T) {
+	encoded, err := json.Marshal(signal.Signal{
+		RuleID:       "rule-1",
+		RuleName:     "example",
+		ConfidenceID: signal.ConfidenceLow,
+		Confidence:   "low",
+		TTPs:         []signal.TTP{{ID: "T1003"}},
+		Actor:        signal.Actor{User: signal.User{Name: "alice"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), `"timestamp"`) {
-		t.Fatalf("zero timestamp was serialized: %s", encoded)
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"rule_id": "rule-1", "rule_name": "example",
+		"confidence_id": float64(signal.ConfidenceLow), "confidence": "low",
+		"ttps":  []any{map[string]any{"id": "T1003"}},
+		"actor": map[string]any{"user": map[string]any{"name": "alice"}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("unexpected signal JSON (-want +got):\n%s", diff)
 	}
 }

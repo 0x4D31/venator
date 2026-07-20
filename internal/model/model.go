@@ -94,6 +94,7 @@ type RunReport struct {
 	StartedAt     time.Time     `json:"started_at"`
 	FinishedAt    time.Time     `json:"finished_at"`
 	Queried       int           `json:"queried"`
+	Matched       int           `json:"matched"`
 	Excluded      int           `json:"excluded"`
 	Findings      int           `json:"findings"`
 	ReviewError   string        `json:"review_error,omitempty"`

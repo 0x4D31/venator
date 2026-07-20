@@ -46,12 +46,12 @@ a data source or sink is not idempotent, and set an execution deadline in the
 scheduler. A non-zero exit status means the run did not complete successfully
 and should be retried or alerted on.
 
-[`examples/`](examples/) is a runnable finite `file.ndjson` snapshot used by the
-host schedulers, so their example jobs do real work without waiting on stdin.
-Production schedules normally use ClickHouse, OpenSearch, BigQuery, or a finite
-spool produced by a collector with explicit checkpoint semantics. If another
-process supplies stdin, schedule a fixed wrapper pipeline and preserve both
-processes' exit statuses.
+[`examples/`](examples/) is a runnable finite `file.ndjson` event batch used by
+the host schedulers; its CEL expression selects one event, so example jobs do
+real work without waiting on stdin. Production schedules normally use
+ClickHouse, OpenSearch, BigQuery, or a finite spool produced by a collector with
+explicit checkpoint semantics. If another process supplies stdin, schedule a
+fixed wrapper pipeline and preserve both processes' exit statuses.
 
 The [lightweight local-detection guide](../docs/local-detection.md) explains
 finite-input semantics, continuous collector handoff, Raspberry Pi operation,

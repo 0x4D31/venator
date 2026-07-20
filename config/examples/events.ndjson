@@ -1,2 +1,2 @@
-{"timestamp":"2026-07-18T12:00:00Z","host":"macbook","user":"alice","event":"unexpected-login","severity":4}
-{"timestamp":"2026-07-18T12:01:00Z","host":"homelab","user":"service-account","event":"new-admin-key","severity":5}
+{"timestamp":"2026-07-18T12:00:00Z","host":"macbook","user":"alice","kind":"unexpected-login","severity":4}
+{"timestamp":"2026-07-18T12:01:00Z","host":"homelab","user":"service-account","kind":"new-admin-key","severity":5}

@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -220,6 +222,69 @@ func TestRunEnforcesRuntimeByteLimitBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestRunEvaluatesLocalNDJSONExpressionBeforeExclusions(t *testing.T) {
+	dir := t.TempDir()
+	exclusions := filepath.Join(dir, "exclusions.yaml")
+	if err := os.WriteFile(exclusions, []byte(`- conditions:
+    and:
+      - field: suppress
+        operator: equals
+        value: "yes"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var batches []model.PublishBatch
+	rule := testRule()
+	rule.QueryEngine = "file.ndjson"
+	rule.Language = "NDJSON"
+	rule.Query = "events.ndjson"
+	rule.Expr = stringPointer(`event.detect == true`)
+	rule.ExclusionsPath = exclusions
+	registry := fakeRegistry{
+		sources: map[string]connector.QueryRunner{"file.ndjson": fakeSource{records: []model.Record{
+			{"id": "not-matched", "detect": false, "suppress": "yes"},
+			{"id": "excluded", "detect": true, "suppress": "yes"},
+			{"id": "finding", "detect": true, "suppress": "no"},
+		}}},
+		sinks: map[string]connector.Publisher{"required": fakeSink{batches: &batches}},
+	}
+	report, err := Run(context.Background(), registry, rule, Options{Now: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Queried != 3 || report.Matched != 2 || report.Excluded != 1 || report.Findings != 1 {
+		t.Fatalf("report = %#v", report)
+	}
+	if len(batches) != 1 || len(batches[0].Findings) != 1 {
+		t.Fatalf("batches = %#v", batches)
+	}
+	payload, ok := batches[0].Findings[0].Payload.(model.Record)
+	if !ok || payload["id"] != "finding" {
+		t.Fatalf("payload = %#v", batches[0].Findings[0].Payload)
+	}
+}
+
+func TestRunExpressionErrorPreventsPublication(t *testing.T) {
+	var batches []model.PublishBatch
+	rule := testRule()
+	rule.QueryEngine = "stdin.default"
+	rule.Language = "NDJSON"
+	rule.Query = ""
+	rule.Expr = stringPointer(`event.kind == "failed_login"`)
+	registry := fakeRegistry{
+		sources: map[string]connector.QueryRunner{"stdin.default": fakeSource{records: []model.Record{{"message": "missing event"}}}},
+		sinks:   map[string]connector.Publisher{"required": fakeSink{batches: &batches}},
+	}
+	report, err := Run(context.Background(), registry, rule, Options{Now: fixedClock()})
+	if err == nil || !strings.Contains(err.Error(), "evaluate expr for source record 1") {
+		t.Fatalf("error = %v", err)
+	}
+	if report.Status != "failed" || report.Queried != 1 || report.Matched != 0 || len(batches) != 0 {
+		t.Fatalf("report/batches = %#v %#v", report, batches)
+	}
+}
+
 func TestOversizedReviewCannotSuppressDeterministicFinding(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -272,7 +337,7 @@ func TestRunRetainsIdenticalSourceRowsWithDistinctStableIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Findings != 2 || len(batches) != 1 || len(batches[0].Findings) != 2 {
+	if report.Matched != 2 || report.Findings != 2 || len(batches) != 1 || len(batches[0].Findings) != 2 {
 		t.Fatalf("report/batches = %#v %#v", report, batches)
 	}
 	first := batches[0].Findings[0].ID
@@ -558,3 +623,5 @@ func fixedClock() func() time.Time {
 	current := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	return func() time.Time { current = current.Add(time.Millisecond); return current }
 }
+
+func stringPointer(value string) *string { return &value }

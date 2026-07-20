@@ -1,8 +1,9 @@
 # Lightweight local detection
 
 Venator does not require a SIEM or data lake. It does require bounded work: one
-invocation reads a finite candidate set or runs one bounded query, builds
-canonical findings, attempts delivery, produces a run result, and exits.
+invocation reads a finite NDJSON batch or runs one bounded query, selects
+records, builds canonical findings, attempts delivery, produces a run result,
+and exits.
 
 Venator is not a collector, long-running webhook server, event queue, or
 general-purpose stream processor. Keeping those boundaries explicit makes a
@@ -13,25 +14,28 @@ local deployment small without inventing unsafe replay or checkpoint behavior.
 Use Venator when its rule-run contract matters:
 
 - one independently scheduled, observable, and rerunnable job per rule;
+- a bounded per-event CEL expression for local NDJSON events;
 - a versioned canonical finding schema and explicit evidence identity;
 - exclusions and deterministic output mapping;
 - required and best-effort sink fan-out with delivery receipts;
 - optional bounded advisory AI review; and
 - an exit status that a scheduler can use for retries and alerting.
 
-An upstream collector, scanner, or query tool may select candidate events;
-Venator is independently responsible for normalizing and delivering the
-resulting detections. If the upstream process already provides every property
-you need, adding another component is unnecessary.
+An upstream collector owns collection and checkpoints. It can give Venator raw
+JSON events for per-event selection or preselected scanner findings; Venator
+then owns the rule result and delivery contract. If the upstream process
+already provides every property you need, adding another component is
+unnecessary.
 
 ## Choose the smallest boundary
 
 | Need | Recommended boundary |
 | --- | --- |
-| Completed scanner output or NDJSON batch | `stdin.default` or `file.ndjson` |
-| Ad hoc filtering across completed JSON files | Query or filter first, then emit finite NDJSON |
+| Finite NDJSON event batch | `stdin.default` or `file.ndjson` with a CEL `expr` |
+| Preselected scanner findings | Local NDJSON source with no `expr` |
+| Ad hoc per-event JSON test | Local NDJSON source with a CEL `expr` |
 | Continuously appended files, rotation, or journald | Checkpointing collector, then completed batches |
-| Parsing, correlation, or windowing | Upstream event processor, then bounded candidates |
+| Parsing, correlation, joins, or windowing | Upstream processor or query store, then bounded events |
 | HTTP event ingestion | Narrow authenticated receiver with a durable queue |
 | Filtering plus one alert destination | A single upstream pipeline may be sufficient |
 | Retained, high-volume history | ClickHouse, OpenSearch, or another query store |
@@ -51,10 +55,18 @@ detector.
 snapshot. It reads from the beginning on every run and does not remember
 offsets, follow rotations, or wait for appended records.
 
-For both sources, every record remaining after exclusions becomes a finding.
-They do not evaluate a general match expression over arbitrary raw logs.
-Filter upstream with a scanner, SQL query, or another bounded processor and
-provide only candidate records.
+For both sources, an optional CEL `expr` makes one boolean decision per JSON
+object. For example, `has(event.severity) && event.severity >= 5` selects
+records with a high numeric severity. Omit the expression when every input
+object is already a candidate. Matching records then pass through exclusions;
+the remainder become findings. A missing field or incompatible type that is
+not handled by the expression fails the run before publication.
+
+This is deliberately smaller than a log-query engine. It does not parse text,
+transform records, compare one event with another, aggregate, join, or keep a
+time window. Perform those operations in the producer or a bounded database
+query. The [rule reference](rule-reference.md#local-ndjson-expression) defines
+the expression syntax and limits.
 
 Preserve both process exit statuses when using a pipe. That reports an upstream
 failure but cannot undo findings published from partial output; stage and
@@ -94,24 +106,19 @@ batches then keep the same finding IDs. Sinks must still tolerate duplicates:
 a retry can repeat one delivery that succeeded before another required sink
 failed.
 
-## Local producer compatibility
+## Existing local detectors
 
-- Bumblebee emits finite NDJSON on stdout. Select only `record_type: finding`
-  because `--findings-only` also emits a `scan_summary`. A host-scoped rule can
-  use `[record_id]` for identity. For combined hosts, project nested
-  `endpoint.device_id` (or a stable hostname fallback) upstream into a
-  top-level `endpoint_id`, then use `[endpoint_id, record_id]`. Stage the output
-  first if a failed scan must never publish partial results.
-- Stinger's per-session `reports/<session-id>/events.ndjson` is suitable after
-  the session closes. Select `trap.trigger` and `shim.trigger`, not every alert
-  event, and scope its top-level `event.id` with the host or session. Its global
-  file is append-only and needs a checkpointing collector.
-- SantaMon already performs CEL detection, correlation, queueing, and HTTP
-  shipping. It should normally deliver directly to its backend or an
-  automation receiver. v0.2.0 has no direct SantaMon-to-Venator adapter; a
-  bounded export or external receiver is required. Add Venator only when a
-  separate canonicalization, multi-sink, or agent-handoff stage is worth
-  operating.
+Completed Bumblebee output and closed Stinger session reports can feed Venator.
+Use a CEL expression when the decision depends only on fields in one JSON
+record; otherwise select actual findings in a bounded upstream step. Project
+stable, top-level identity fields when the producer exposes them. Do not point
+`file.ndjson` at an append-only report; stage the batch first when producer
+success must be atomic with publication.
+
+SantaMon already provides detection, queueing, and delivery, so it should
+normally send directly to its backend or automation receiver. Add Venator only
+when its canonical finding, multi-sink delivery, or agent-handoff contract is
+worth operating as a separate stage.
 
 Do not add Venator merely to put another process between an existing detector
 and its only destination. A Raspberry Pi receiver also sees only data that the

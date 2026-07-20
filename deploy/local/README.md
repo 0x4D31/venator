@@ -59,15 +59,15 @@ preserve the exit status. Use [`../launchd/`](../launchd/) on macOS or
 schedule and retries.
 
 The sample exercises the finite `file.ndjson` source. It rereads the snapshot
-on every invocation. Stable finding IDs help idempotent sinks, but the source
-does not filter arbitrary raw logs or own a read offset.
+on every invocation and applies the rule's CEL expression to each event. Stable
+finding IDs help idempotent sinks, but the source does not own a read offset.
 
 For continuously growing files or journald, use a checkpointing collector and
-hand Venator completed candidate batches. Do not use `tail -F | venator`:
-publication waits for EOF, and a row, byte, or time limit may be reached first.
-The [lightweight local-detection guide](../../docs/local-detection.md) covers
-durable spool handoff, collector boundaries, and 64-bit Raspberry Pi
-deployments.
+hand Venator completed event or candidate batches. Do not use
+`tail -F | venator`: publication waits for EOF, and a row, byte, or time limit
+may be reached first. The
+[lightweight local-detection guide](../../docs/local-detection.md) covers durable
+spool handoff, collector boundaries, and 64-bit Raspberry Pi deployments.
 
 ## Credentials
 

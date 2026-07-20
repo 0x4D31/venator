@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/0x4D31/venator/internal/predicate"
 	"github.com/0x4D31/venator/internal/yamlshape"
 	"go.yaml.in/yaml/v3"
 )
@@ -18,6 +19,7 @@ type RuleConfig struct {
 	Description          string          `yaml:"description"`
 	Enabled              bool            `yaml:"enabled"`
 	ExclusionsPath       string          `yaml:"exclusionsPath,omitempty"`
+	Expr                 *string         `yaml:"expr,omitempty"`
 	Identity             *Identity       `yaml:"identity,omitempty"`
 	Language             string          `yaml:"language"`
 	LLM                  *LLM            `yaml:"llm,omitempty"`
@@ -184,6 +186,17 @@ func (c *RuleConfig) Validate() error {
 	}
 	if err := validateSourceLanguage(c.QueryEngine, c.Language, c.Query); err != nil {
 		return err
+	}
+	if c.Expr != nil {
+		if strings.TrimSpace(*c.Expr) == "" {
+			return fmt.Errorf("expr cannot be empty")
+		}
+		if c.QueryEngine != "stdin.default" && c.QueryEngine != "file.ndjson" {
+			return fmt.Errorf("expr is supported only for queryEngine %q or %q", "stdin.default", "file.ndjson")
+		}
+		if _, err := predicate.Compile(*c.Expr); err != nil {
+			return fmt.Errorf("invalid expr: %w", err)
+		}
 	}
 	if c.Identity != nil {
 		if len(c.Identity.Fields) == 0 {

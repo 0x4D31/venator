@@ -7,12 +7,10 @@ schedule: "5 * * * *"
 queryEngine: file.ndjson
 publishers: [stdout.default]
 language: NDJSON
-query: events.ndjson
+query: ./events.ndjson
+expr: event.kind == "kubernetes_smoke"
 output:
   format: raw
-  fields: []
-description: Kubernetes smoke rule over a mounted finite NDJSON snapshot.
-references: []
+description: Detect the smoke event in a mounted finite snapshot.
 tags: [example, kubernetes]
 author: "0x4D31"
-ttps: []

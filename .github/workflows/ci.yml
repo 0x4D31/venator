@@ -47,7 +47,7 @@ jobs:
           dist/venator run \
             --global-config deploy/examples/global.yaml \
             --rule-config deploy/examples/rule.yaml > dist/findings.ndjson
-          test "$(wc -l < dist/findings.ndjson)" -eq 2
+          test "$(wc -l < dist/findings.ndjson)" -eq 1
 
   clickhouse-integration:
     name: ClickHouse native and HTTP integration

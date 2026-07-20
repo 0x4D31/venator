@@ -1,7 +1,10 @@
 # Rule and exclusion reference
 
 Venator reads one YAML document per rule and rejects unknown keys. A direct
-invocation runs one rule once; scheduling belongs to the caller.
+invocation runs one rule once; scheduling belongs to the caller. The CLI does
+not accept a rule directory: a scheduler or wrapper should start one process
+per rule file so logs, deadlines, retries, reports, and exit statuses remain
+independent. The Helm chart performs that expansion for packaged rule trees.
 
 ## Rule document
 
@@ -15,7 +18,8 @@ invocation runs one rule once; scheduling belongs to the caller.
 | `schedule` | Optional opaque deployment metadata. The binary neither parses nor executes it. Helm requires a non-empty Kubernetes CronJob schedule for every enabled packaged rule; Kubernetes validates that syntax. |
 | `queryEngine` | Required source name. Built-ins are `stdin.default` and `file.ndjson`; configured sources use `<connector>.<instance>`. |
 | `language` | Required. `stdin.default` and `file.ndjson` require `NDJSON`; BigQuery and ClickHouse require `SQL`; OpenSearch accepts `SQL` or `PPL`. |
-| `query` | Required except for `stdin.default`, where it must be empty. A relative `file.ndjson` path is resolved from the rule file's directory. |
+| `query` | Source-specific input. It is required except for `stdin.default`, where it must be omitted or empty. For `file.ndjson`, it is a completed NDJSON-file path; a relative path is resolved from the rule file's directory. |
+| `expr` | Optional non-empty CEL boolean evaluated for each `stdin.default` or `file.ndjson` event. Omit it when the input already contains only candidates. It is invalid for other sources. |
 | `identity` | Optional finding-identity projection, described below. Omit it to hash the complete source record. |
 | `publishers` | Required-delivery sink names. Every sink is attempted; any failure makes the run fail. |
 | `bestEffortPublishers` | Best-effort sink names. Failures are reported but do not fail an otherwise successful run. At least one sink across the two publisher lists is required, and names cannot repeat. |
@@ -30,6 +34,43 @@ connector references, local files, exclusions, and reviewer configuration
 without issuing the detection query. Connector instance keys may contain only
 ASCII letters, digits, hyphens, and underscores; dots are reserved as the
 separator in `<connector>.<instance>`.
+
+### Local NDJSON expression
+
+The two local NDJSON sources can select records with a
+[Common Expression Language](https://cel.dev/) predicate. The only variable is
+`event`, a map containing the current JSON object:
+
+```yaml
+queryEngine: file.ndjson
+language: NDJSON
+query: ./events.ndjson
+expr: |
+  event.kind == "failed_login" &&
+  has(event.severity) &&
+  event.severity >= 4
+```
+
+Identifier-like JSON keys support `event.key`; use bracket access for keys
+containing dots, spaces, reserved words, or other punctuation, for example
+`event["process.name"] == "loginwindow"`. CEL collection macros are
+available, so a list can be tested with an expression such as
+`event.tags.exists(tag, tag == "admin")`. JSON integers become CEL `int` or
+`uint`, decimal and exponent values become `double`, and comparisons across
+numeric types are enabled.
+
+The expression is compiled during configuration validation and must have a
+boolean result. Evaluation errors—including an unguarded missing field, an
+incompatible type, or an out-of-range number—fail the run before any finding is
+published. Use `has(event.field)` when a key is optional. Venator limits the
+expression to 4,096 code points, parser depth to 100, and runtime cost to
+100,000 units per event. Expressions are stateless and cannot transform
+records, aggregate a batch, correlate events, or maintain a time window.
+
+Expression evaluation runs after source size checks and before exclusions. Run
+reports use `queried` for source records, `matched` for events whose expression
+returned true (or all events when `expr` is omitted), `excluded` for matched
+events suppressed by exclusions, and `findings` for the final count.
 
 ### Finding identity
 
@@ -47,13 +88,14 @@ exact top-level source key; dots have no path-traversal meaning. Every selected
 key must exist on every retained record at runtime. Include a host, tenant, or
 other namespace when the event key is not globally unique.
 
-Identity is evaluated after exclusions. Different retained records in the same
-run may not share one configured identity. A collision fails before publication
-instead of making identity depend on source order. Operators must still choose
-keys that are unique across every source population and run sharing the rule
-UID. Byte-identical duplicate records remain distinct and receive stable
-occurrence IDs. Identity controls the envelope ID only; raw output still retains
-the complete record, and signal output still follows its field mapping.
+Identity is evaluated after expression evaluation and exclusions. Different
+retained records in the same run may not share one configured identity. A
+collision fails before publication instead of making identity depend on source
+order. Operators must still choose keys that are unique across every source
+population and run sharing the rule UID. Byte-identical duplicate records
+remain distinct and receive stable occurrence IDs. Identity controls the
+envelope ID only; raw output still retains the complete record, and signal
+output still follows its field mapping.
 Changing the identity field set can change finding IDs and cause downstream
 redelivery.
 
@@ -64,8 +106,9 @@ Raw output preserves each complete typed source record:
 ```yaml
 output:
   format: raw
-  fields: []
 ```
+
+The `fields` key must be omitted or empty.
 
 Signal output maps selected source columns into the normalized signal payload;
 unmapped source fields are not retained. It requires at least one mapping,

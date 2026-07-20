@@ -7,12 +7,10 @@ schedule: "5 * * * *"
 queryEngine: file.ndjson
 publishers: [stdout.default]
 language: NDJSON
-query: events.ndjson
+query: ./events.ndjson
+expr: event.kind == "failed_login"
 output:
   format: raw
-  fields: []
-description: Emit findings for a finite local NDJSON snapshot.
-references: []
+description: Detect failed logins in a finite local event snapshot.
 tags: [example, local]
 author: "0x4D31"
-ttps: []

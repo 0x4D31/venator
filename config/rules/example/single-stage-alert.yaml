@@ -1,6 +1,5 @@
-# A runnable local example: NDJSON candidates on stdin become canonical Venator
-# findings on stdout. Pipe a scanner, query tool, local agent, or another
-# bounded producer into this rule.
+# A runnable local example: bounded NDJSON events on stdin are selected with
+# CEL and become canonical Venator findings on stdout.
 name: local-ndjson-alert
 uid: 6722b4ed-f891-4906-a4b2-f57762dfc72b
 status: stable
@@ -11,15 +10,13 @@ queryEngine: stdin.default
 publishers:
   - stdout.default
 language: NDJSON
-query: ""
+expr: has(event.severity) && event.severity >= 5
 output:
   format: raw
-  fields: []
-description: Wrap pre-filtered local NDJSON events in the canonical Venator finding envelope.
+description: Detect high-severity events from a bounded local NDJSON producer.
 references:
   - https://github.com/0x4D31/venator
 tags:
   - local
   - ndjson
 author: "0x4D31"
-ttps: []

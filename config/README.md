@@ -66,4 +66,4 @@ unpackaged paths are rejected during rendering.
 The bundled example rule is disabled. Add or enable a real source-backed rule
 before installation; the chart intentionally does not schedule an empty-stdin
 smoke job. Rule and exclusion syntax is documented in the
-[v0.2.0 reference](https://github.com/0x4D31/venator/blob/v0.2.0/docs/rule-reference.md).
+[v0.2.0 reference](../docs/rule-reference.md).

@@ -22,13 +22,14 @@ queryEngine: stdin.default
 publishers: [stdout.default]
 language: NDJSON
 query: ""
+expr: event.count >= 2
 output:
   format: raw
   fields: []
 `)
 	report := filepath.Join(dir, "run.json")
 	var stdout, stderr bytes.Buffer
-	code := realMain([]string{"run", "--global-config", global, "--rule-config", rule, "--report-file", report}, strings.NewReader("{\"count\":2}\n"), &stdout, &stderr)
+	code := realMain([]string{"run", "--global-config", global, "--rule-config", rule, "--report-file", report}, strings.NewReader("{\"count\":1}\n{\"count\":2}\n"), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -37,6 +38,7 @@ output:
 	}
 	if !strings.Contains(stderr.String(), "rule run completed with findings") ||
 		!strings.Contains(stderr.String(), "rule_name=local") ||
+		!strings.Contains(stderr.String(), "matched=1") ||
 		!strings.Contains(stderr.String(), "findings=1") {
 		t.Fatalf("stderr=%s", stderr.String())
 	}
@@ -44,7 +46,7 @@ output:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(contents, []byte(`"status": "succeeded"`)) {
+	if !bytes.Contains(contents, []byte(`"status": "succeeded"`)) || !bytes.Contains(contents, []byte(`"matched": 1`)) {
 		t.Fatalf("report=%s", contents)
 	}
 }
@@ -218,6 +220,18 @@ func TestInvalidFlagIsReportedOnceWithCommandHint(t *testing.T) {
 		!strings.Contains(stderr.String(), "venator run --help") ||
 		strings.Contains(stderr.String(), "Usage of venator") {
 		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestCommandsRequireGlobalConfig(t *testing.T) {
+	for _, command := range []string{"run", "validate"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := realMain([]string{command, "--rule-config", "rule.yaml"}, strings.NewReader(""), &stdout, &stderr)
+			if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "--global-config is required") {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 

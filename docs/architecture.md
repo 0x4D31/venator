@@ -7,7 +7,8 @@ it. The design follows five boundaries.
 flowchart TD
   S["Scheduler adapter"] --> R["One rule run"]
   R --> Q["Typed source query"]
-  Q --> D["Exclusions and deterministic transform"]
+  Q --> F["Optional local CEL expression"]
+  F --> D["Exclusions and deterministic transform"]
   D --> A["Optional advisory review"]
   A --> P["Canonical sink fan-out"]
   P --> O["Run report and exit status"]
@@ -33,10 +34,17 @@ Rule queries are trusted operator code, not a sandbox. Server-side
 least-privilege credentials remain the authoritative control for SQL and PPL
 sources; client limits bound cost and results but do not replace authorization.
 
+The two local NDJSON sources may evaluate one bounded CEL boolean expression
+per event. The generic `event` map preserves the input JSON shape. Expressions
+compile before source execution, run after source size checks, and fail the
+batch before publication on evaluation errors. They do not carry state between
+events.
+
 ## 3. The engine builds each finding once
 
-The engine applies exclusions, builds raw or signal output once, and wraps it
-in `venator.finding/v1`. Raw output retains the complete typed source record;
+The engine selects local events, applies exclusions, builds raw or signal
+output once, and wraps it in `venator.finding/v1`. Raw output retains the
+complete typed source record;
 signal output deliberately retains only mapped normalized fields. Every sink
 gets that same object. A finding ID is the SHA-256 of the rule UID plus the
 complete source evidence by default. A rule may instead select exact top-level
@@ -75,6 +83,7 @@ key.
 v0.2.0 deliberately does not keep log data or a hidden scheduler database.
 ClickHouse/OpenSearch/BigQuery can own queryable history, while an external
 collector owns file watching and parsing. Direct NDJSON allows any local tool
-to provide already filtered candidates. v0.2.0 has no checkpoint state. Any
-future incremental source requires an explicit durable acknowledgement and
-replay contract before it can advance a cursor.
+to provide finite events for CEL evaluation or already filtered candidates.
+v0.2.0 has no checkpoint state. Any future incremental source requires an
+explicit durable acknowledgement and replay contract before it can advance a
+cursor.

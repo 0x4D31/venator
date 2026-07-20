@@ -14,7 +14,8 @@ first-class workflow.
 - Official ClickHouse source/sink support with bounded queries, TLS/mTLS,
   native or HTTP protocols, and batch finding inserts.
 - Built-in NDJSON stdin, finite-file source, and stdout sink for local agents,
-  workstation snapshots, and bounded producer pipelines.
+  workstation snapshots, and bounded producer pipelines, with a bounded
+  per-event CEL detection expression for local inputs.
 - Optional exact-field identity projections for producers whose records contain
   stable event keys alongside volatile scan or run metadata.
 - Generic webhook delivery of canonical findings, with optional Standard
@@ -81,6 +82,10 @@ first-class workflow.
   standard-library security fixes.
 - Every sink receives the same pre-built finding rather than transforming raw
   query rows independently.
+- Both CLI configuration paths are explicit; the old repository-relative
+  global-config default is removed.
+- Signal payloads omit unmapped normalized fields instead of serializing empty
+  nested objects.
 - Required and best-effort sinks fan out concurrently so one slow destination
   cannot starve another before the run deadline.
 - The legacy `llm` block is an advisory reviewer, not an alert gate.

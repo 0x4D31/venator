@@ -18,6 +18,7 @@ import (
 	"github.com/0x4D31/venator/internal/config"
 	"github.com/0x4D31/venator/internal/exclusion"
 	"github.com/0x4D31/venator/internal/model"
+	"github.com/0x4D31/venator/internal/predicate"
 	"github.com/0x4D31/venator/internal/signal"
 )
 
@@ -80,6 +81,10 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
+	detectionPredicate, err := compileDetectionExpression(rule)
+	if err != nil {
+		return report, err
+	}
 	if !rule.Enabled && !opts.Force {
 		report.Status = "skipped"
 		return report, nil
@@ -120,20 +125,26 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		}
 	}
 
-	if excluder != nil {
-		filtered := make([]model.Record, 0, len(records))
-		for _, record := range records {
-			if err := ctx.Err(); err != nil {
-				return report, err
-			}
-			if excluder.IsExcluded(record) {
-				report.Excluded++
-				continue
-			}
-			filtered = append(filtered, record)
+	retained := make([]model.Record, 0, len(records))
+	for i, record := range records {
+		if err := ctx.Err(); err != nil {
+			return report, err
 		}
-		records = filtered
+		matched, err := detectionPredicate.Match(ctx, record)
+		if err != nil {
+			return report, fmt.Errorf("evaluate expr for source record %d: %w", i+1, err)
+		}
+		if !matched {
+			continue
+		}
+		report.Matched++
+		if excluder != nil && excluder.IsExcluded(record) {
+			report.Excluded++
+			continue
+		}
+		retained = append(retained, record)
 	}
+	records = retained
 
 	detectedAt := now().UTC()
 	findings := make([]model.Finding, 0, len(records))
@@ -302,6 +313,23 @@ type identityOwner struct {
 	record []byte
 }
 
+func compileDetectionExpression(rule *config.RuleConfig) (*predicate.Predicate, error) {
+	if rule.Expr == nil {
+		return nil, nil
+	}
+	if strings.TrimSpace(*rule.Expr) == "" {
+		return nil, fmt.Errorf("expr cannot be empty")
+	}
+	if rule.QueryEngine != "stdin.default" && rule.QueryEngine != "file.ndjson" {
+		return nil, fmt.Errorf("expr is supported only for local NDJSON sources")
+	}
+	compiled, err := predicate.Compile(*rule.Expr)
+	if err != nil {
+		return nil, fmt.Errorf("compile rule expr: %w", err)
+	}
+	return compiled, nil
+}
+
 func findingIdentity(record model.Record, identity *config.Identity) (model.Record, error) {
 	if identity == nil {
 		return record, nil
@@ -335,8 +363,8 @@ func measureFindings(ctx context.Context, findings []model.Finding, maxBytes int
 	return ctx.Err()
 }
 
-// ValidateRuleFiles resolves and parses local files referenced by a rule
-// without querying a source.
+// ValidateRuleFiles validates static local file references without querying a
+// source.
 func ValidateRuleFiles(rulePath string, rule *config.RuleConfig) error {
 	if rule == nil {
 		return fmt.Errorf("rule is nil")

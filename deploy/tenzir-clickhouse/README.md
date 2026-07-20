@@ -9,13 +9,13 @@ The examples cover two optional handoff patterns.
 
 ## Direct NDJSON boundary
 
-For light local detection over a completed input, let Tenzir read and filter a
-file and write bounded NDJSON directly to Venator's built-in stdin source:
+For light local detection over a completed input, let Tenzir read a file and
+write bounded NDJSON directly to Venator's built-in stdin source. The Venator
+rule's CEL expression selects high-severity events:
 
 ```sh
 set -o pipefail # bash/zsh: preserve both Tenzir and Venator failures
 tenzir 'from_file "/var/log/security/events.ndjson"
-  where severity >= 3
   write_ndjson' |
 venator run \
   --global-config config/files/global_config.yaml \
