@@ -7,7 +7,7 @@ it. The design follows five boundaries.
 flowchart TD
   S["Scheduler adapter"] --> R["One rule run"]
   R --> Q["Typed source query"]
-  Q --> F["Optional local CEL expression"]
+  Q --> F["SQL, PPL, or CEL selection"]
   F --> D["Exclusions and deterministic transform"]
   D --> A["Optional advisory review"]
   A --> P["Canonical sink fan-out"]
@@ -25,20 +25,20 @@ history and debugging UI without making the engine depend on Kubernetes APIs.
 
 `model.Record` is `map[string]any`. Sources retain nulls, booleans, numbers,
 timestamps, lists, and nested values. Text conversion occurs only for textual
-signal mappings and textual exclusion comparisons. Queries are bounded by
+signal mappings. Queries are bounded by
 context deadlines and connector row/byte/response limits. `stdin.default` is a
-pipeline boundary; `file.ndjson` reads one finite rule-relative snapshot. It is
-not a tailer and owns no hidden offset.
+pipeline boundary; `ndjson.<instance>` reads one finite file named in global
+configuration. It is not a tailer and owns no hidden offset.
 
 Rule queries are trusted operator code, not a sandbox. Server-side
 least-privilege credentials remain the authoritative control for SQL and PPL
 sources; client limits bound cost and results but do not replace authorization.
 
-The two local NDJSON sources may evaluate one bounded CEL boolean expression
-per event. The generic `event` map preserves the input JSON shape. Expressions
+The two local NDJSON source forms evaluate one bounded CEL boolean query per
+event. The generic `event` map preserves the input JSON shape. Queries
 compile before source execution, run after source size checks, and fail the
-batch before publication on evaluation errors. They do not carry state between
-events.
+batch before publication on evaluation errors. Exclusions reuse the same typed
+CEL predicate model. Neither carries state between events.
 
 ## 3. The engine builds each finding once
 

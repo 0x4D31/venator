@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/0x4D31/venator/internal/predicate"
@@ -18,8 +17,7 @@ type RuleConfig struct {
 	Confidence           ConfidenceLevel `yaml:"confidence"`
 	Description          string          `yaml:"description"`
 	Enabled              bool            `yaml:"enabled"`
-	ExclusionsPath       string          `yaml:"exclusionsPath,omitempty"`
-	Expr                 *string         `yaml:"expr,omitempty"`
+	ExclusionsFile       string          `yaml:"exclusionsFile,omitempty"`
 	Identity             *Identity       `yaml:"identity,omitempty"`
 	Language             string          `yaml:"language"`
 	LLM                  *LLM            `yaml:"llm,omitempty"`
@@ -28,7 +26,7 @@ type RuleConfig struct {
 	Publishers           []string        `yaml:"publishers"`
 	BestEffortPublishers []string        `yaml:"bestEffortPublishers,omitempty"`
 	Query                string          `yaml:"query"`
-	QueryEngine          string          `yaml:"queryEngine"`
+	Source               string          `yaml:"source"`
 	References           []string        `yaml:"references"`
 	Schedule             string          `yaml:"schedule"`
 	Status               string          `yaml:"status"`
@@ -122,9 +120,7 @@ func ParseRuleConfig(path string) (*RuleConfig, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid rule config: %w", err)
 	}
-	if cfg.QueryEngine == "file.ndjson" && !filepath.IsAbs(cfg.Query) {
-		cfg.Query = filepath.Clean(filepath.Join(filepath.Dir(path), cfg.Query))
-	}
+	cfg.Language = strings.ToUpper(strings.TrimSpace(cfg.Language))
 
 	return &cfg, nil
 }
@@ -167,35 +163,38 @@ func (c *RuleConfig) Validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("name is required")
 	}
+	if c.Name != strings.TrimSpace(c.Name) {
+		return fmt.Errorf("name must not have leading or trailing whitespace")
+	}
 	if strings.TrimSpace(c.UID) == "" {
 		return fmt.Errorf("uid is required")
+	}
+	if c.UID != strings.TrimSpace(c.UID) {
+		return fmt.Errorf("uid must not have leading or trailing whitespace")
 	}
 	switch c.Confidence {
 	case ConfidenceUnknown, ConfidenceLow, ConfidenceMedium, ConfidenceHigh:
 	default:
 		return fmt.Errorf("unsupported confidence %q", c.Confidence)
 	}
-	if strings.TrimSpace(c.QueryEngine) == "" {
-		return fmt.Errorf("queryEngine is required")
+	if strings.TrimSpace(c.Source) == "" {
+		return fmt.Errorf("source is required")
 	}
-	if strings.TrimSpace(c.Query) == "" && c.QueryEngine != "stdin.default" {
-		return fmt.Errorf("query is required for queryEngine %q", c.QueryEngine)
+	if c.Source != strings.TrimSpace(c.Source) {
+		return fmt.Errorf("source must not have leading or trailing whitespace")
+	}
+	if strings.TrimSpace(c.Query) == "" {
+		return fmt.Errorf("query is required for source %q", c.Source)
 	}
 	if strings.TrimSpace(c.Language) == "" {
 		return fmt.Errorf("language is required")
 	}
-	if err := validateSourceLanguage(c.QueryEngine, c.Language, c.Query); err != nil {
+	if err := validateSourceLanguage(c.Source, c.Language); err != nil {
 		return err
 	}
-	if c.Expr != nil {
-		if strings.TrimSpace(*c.Expr) == "" {
-			return fmt.Errorf("expr cannot be empty")
-		}
-		if c.QueryEngine != "stdin.default" && c.QueryEngine != "file.ndjson" {
-			return fmt.Errorf("expr is supported only for queryEngine %q or %q", "stdin.default", "file.ndjson")
-		}
-		if _, err := predicate.Compile(*c.Expr); err != nil {
-			return fmt.Errorf("invalid expr: %w", err)
+	if strings.EqualFold(strings.TrimSpace(c.Language), "CEL") {
+		if _, err := predicate.Compile(c.Query); err != nil {
+			return fmt.Errorf("invalid CEL query: %w", err)
 		}
 	}
 	if c.Identity != nil {
@@ -220,6 +219,9 @@ func (c *RuleConfig) Validate() error {
 	for _, name := range append(append([]string(nil), c.Publishers...), c.BestEffortPublishers...) {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("publisher name cannot be empty")
+		}
+		if name != strings.TrimSpace(name) {
+			return fmt.Errorf("publisher %q must not have leading or trailing whitespace", name)
 		}
 		if _, ok := seen[name]; ok {
 			return fmt.Errorf("publisher %q is configured more than once", name)
@@ -288,30 +290,27 @@ func (c *RuleConfig) Validate() error {
 	return nil
 }
 
-func validateSourceLanguage(queryEngine, language, query string) error {
+func validateSourceLanguage(source, language string) error {
 	language = strings.ToUpper(strings.TrimSpace(language))
 	switch {
-	case queryEngine == "stdin.default":
-		if language != "NDJSON" {
-			return fmt.Errorf("queryEngine %q requires language NDJSON", queryEngine)
+	case usesCELQuery(source):
+		if language != "CEL" {
+			return fmt.Errorf("source %q requires language CEL", source)
 		}
-		if strings.TrimSpace(query) != "" {
-			return fmt.Errorf("query must be empty for queryEngine %q", queryEngine)
-		}
-	case queryEngine == "file.ndjson":
-		if language != "NDJSON" {
-			return fmt.Errorf("queryEngine %q requires language NDJSON", queryEngine)
-		}
-	case strings.HasPrefix(queryEngine, "bigquery."), strings.HasPrefix(queryEngine, "clickhouse."):
+	case strings.HasPrefix(source, "bigquery."), strings.HasPrefix(source, "clickhouse."):
 		if language != "SQL" {
-			return fmt.Errorf("queryEngine %q requires language SQL", queryEngine)
+			return fmt.Errorf("source %q requires language SQL", source)
 		}
-	case strings.HasPrefix(queryEngine, "opensearch."):
+	case strings.HasPrefix(source, "opensearch."):
 		if language != "SQL" && language != "PPL" {
-			return fmt.Errorf("queryEngine %q requires language SQL or PPL", queryEngine)
+			return fmt.Errorf("source %q requires language SQL or PPL", source)
 		}
 	}
 	return nil
+}
+
+func usesCELQuery(source string) bool {
+	return source == "stdin.default" || strings.HasPrefix(source, "ndjson.")
 }
 
 func supportedSignalField(name string) bool {

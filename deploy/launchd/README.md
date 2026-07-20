@@ -13,7 +13,7 @@ install -m 0600 deploy/examples/global.yaml \
 install -m 0600 deploy/examples/rule.yaml \
   "$HOME/.config/venator/rules/example.yaml"
 install -m 0600 deploy/examples/events.ndjson \
-  "$HOME/.config/venator/rules/events.ndjson"
+  "$HOME/.config/venator/events.ndjson"
 install -m 0700 deploy/launchd/run-example.sh \
   "$HOME/.local/libexec/venator-run-example"
 sed "s/REPLACE_ME/$(id -un)/g" \
@@ -46,9 +46,9 @@ delayed by sleep run after the Mac wakes; they are not executed once per missed
 interval.
 
 The plist sets umask `077`, and the install steps make the log directory private
-before launchd opens stdout/stderr. The sample rule reads the finite
-`events.ndjson` file beside it, so a scheduled run exercises the complete
-run and delivery path instead of succeeding on empty stdin. A continuously
-growing production log needs a collector with explicit offset and retry
-semantics. Rotate or ship the configured stdout and stderr files; launchd does
+before launchd opens stdout/stderr. The sample's global profile reads the
+finite `events.ndjson` file beside the global YAML, so a scheduled run
+exercises the complete run and delivery path instead of succeeding on empty
+stdin. A continuously growing production log needs a collector with explicit
+offset and retry semantics. Rotate or ship the configured stdout and stderr files; launchd does
 not manage their retention.

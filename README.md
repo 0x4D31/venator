@@ -34,7 +34,7 @@ automation can invoke one rule and act on the same output and exit status.
 flowchart LR
   A["External scheduler"] --> V["Venator one-shot run"]
   V --> S["Typed source"]
-  S --> F["Optional local CEL expression"]
+  S --> F["SQL, PPL, or CEL query"]
   F --> E["Exclusions + deterministic envelope"]
   E --> R["Optional advisory AI review"]
   R --> P["Required and best-effort sinks"]
@@ -73,10 +73,11 @@ go build -trimpath -o venator .
   --rule-config deploy/examples/rule.yaml
 ```
 
-The example needs no credentials or external service. It reads a finite NDJSON
-event snapshot through `file.ndjson`, selects failed logins, and emits
-canonical finding NDJSON through `stdout.default`. A separate `stdin.default`
-source accepts bounded output from scanners, query tools, and agent pipelines.
+The example needs no credentials or external service. Its global configuration
+names a finite NDJSON snapshot as `ndjson.local-events`; the rule uses a CEL
+query to select failed logins and emits canonical finding NDJSON through
+`stdout.default`. The built-in `stdin.default` source accepts bounded output
+from scanners, query tools, and agent pipelines.
 Logs go to stderr, so stdout stays machine-readable. Legacy v0.1 flags without
 the `run` subcommand remain an alias during migration.
 
@@ -90,20 +91,20 @@ and `runtime.maxBytes` bound materialized results and canonical output before
 sink fan-out. Reports and completion logs expose `queried`, `matched`,
 `excluded`, and final `findings` counts.
 
-File and stdin inputs accept finite event or candidate batches. An optional,
-bounded CEL `expr` makes a boolean decision for each event; omitting it means
-every input event is already a candidate. Venator does not tail files, parse
-arbitrary log formats, correlate across records, or maintain windows. Growing
-files and journald need a collector that owns durable cursors, rotation,
-buffering, and backpressure. See
+File and stdin inputs accept finite event or candidate batches. Their required,
+bounded CEL `query` makes one boolean decision for each event; use the explicit
+string `"true"` when every input event is already a candidate. Venator does not
+tail files, parse arbitrary log formats, correlate across records, or maintain
+windows. Growing files and journald need a collector that owns durable cursors,
+rotation, buffering, and backpressure. See
 [lightweight local detection](docs/local-detection.md) for the exact boundary.
 
 ## Sources and sinks
 
 | Connector | Source | Sink | Notes |
 | --- | ---: | ---: | --- |
-| [stdin/stdout NDJSON](connector/stdio/) | yes | yes | Built in; optional per-event CEL expression; bounded producers and agents |
-| [finite NDJSON file](connector/stdio/) | yes | no | Optional per-event CEL expression; rule-relative path, no hidden checkpoint state |
+| [stdin/stdout NDJSON](connector/stdio/) | yes | yes | Built in; per-event CEL query; bounded producers and agents |
+| [finite NDJSON file](connector/stdio/) | yes | no | Named global profile with per-event CEL query; no hidden checkpoint state |
 | [ClickHouse](connector/clickhouse/) | yes | yes | Official Go driver, native/HTTP, typed rows, bounded queries, batch writes |
 | [OpenSearch](connector/opensearch/) | yes | yes | Bounded SQL/PPL queries and idempotent bulk finding writes |
 | [BigQuery](connector/bigquery/) | yes | yes | Typed query values; sink role requires dataset and table |
@@ -119,7 +120,18 @@ neither boundary requires a particular collection or processing product.
 
 ## Rules
 
-A rule owns detection semantics and output mapping, not process scheduling:
+A rule owns detection semantics and output mapping, not process scheduling.
+Finite-file locations are named source profiles in the global configuration:
+
+```yaml
+ndjson:
+  instances:
+    local-events:
+      path: ./events.ndjson
+```
+
+The rule uses the same `source` / `language` / `query` contract as every other
+connector:
 
 ```yaml
 name: local-ndjson-alert
@@ -128,28 +140,27 @@ status: stable
 confidence: high
 enabled: true
 schedule: "5 * * * *" # deployment metadata
-queryEngine: file.ndjson
+source: ndjson.local-events
 publishers: [stdout.default]
-language: NDJSON
-query: ./events.ndjson
-expr: |
+language: CEL
+query: |
   event.kind == "failed_login" &&
   has(event.source_ip)
 output:
   format: raw
 ```
 
-For `file.ndjson`, `query` is the path to a completed event snapshot and is
-resolved relative to the rule YAML. `expr` is an optional CEL boolean over the
-current `event`; it is supported only by the two local NDJSON sources.
-Database and search sources express selection in SQL or PPL. Raw output does
-not define `fields`; signal output requires explicit field mappings.
+For `ndjson.<instance>` and `stdin.default`, `query` is a CEL boolean over the
+current `event`. A relative NDJSON profile path resolves from the global YAML.
+Database and search sources put their SQL or PPL in the same `query` field.
+Raw output does not define `fields`; signal output requires explicit field
+mappings.
 
 Entries in `publishers` are required-delivery sinks: any failure makes the run
 fail after all required sinks have been attempted. `bestEffortPublishers` are
 attempted and recorded but do not fail an otherwise completed run. At least one
-sink across the two lists is required. Exclusion paths can be relative to the
-rule file outside Helm; chart-managed rules use packaged exclusion paths.
+sink across the two lists is required. `exclusionsFile` can be relative to the
+rule file outside Helm; chart-managed rules use packaged exclusion files.
 When `identity.fields` is omitted, the complete source record determines the
 finding ID. Configure exact top-level stable keys when producer timestamps or
 run metadata should not change detection identity.
@@ -179,7 +190,9 @@ own timeout and reserves time for deterministic publishers.
 AI review is best effort by default. Set `llm.required: true` only when a
 missing annotation should make the process return non-zero after deterministic
 findings have still been delivered. A concise local rule is available in
-[`config/examples/llm-review-rule.yaml`](config/examples/llm-review-rule.yaml).
+[`config/examples/llm-review-rule.yaml`](config/examples/llm-review-rule.yaml),
+with its NDJSON profile in
+[`config/examples/llm-review-global.yaml`](config/examples/llm-review-global.yaml).
 
 ## Deployment
 

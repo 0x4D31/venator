@@ -147,12 +147,13 @@ jobs:
           cp -R config /tmp/venator-chart
           sed -i 's/enabled: false/enabled: true/' \
             /tmp/venator-chart/rules/example/single-stage-alert.yaml
-          sed -i '/^queryEngine:/i exclusionsPath: /app/exclusion/example-rule.yaml' \
+          sed -i '/^source:/i exclusionsFile: /app/exclusion/example-rule.yaml' \
             /tmp/venator-chart/rules/example/single-stage-alert.yaml
           helm template venator /tmp/venator-chart --namespace venator \
             --kube-version 1.27.0 > /tmp/venator.yaml
           grep -q '^kind: CronJob$' /tmp/venator.yaml
           grep -q 'name: "example-rule-exclusion"' /tmp/venator.yaml
+          grep -q 'mountPath: /app/exclusion' /tmp/venator.yaml
           helm template venator /tmp/venator-chart --namespace venator \
             --kube-version 1.27.0 \
             -f /tmp/venator-chart/examples/clickhouse-mtls-values.yaml > /tmp/venator-mtls.yaml
@@ -178,7 +179,7 @@ jobs:
           helm_template=(helm template venator /tmp/venator-chart \
             --namespace venator --kube-version 1.27.0)
           sed -i 's#/app/exclusion/example-rule.yaml#exclusions/example-rule.yaml#' "$rule"
-          expect_failure "relative exclusionsPath" "${helm_template[@]}"
+          expect_failure "relative exclusionsFile" "${helm_template[@]}"
           sed -i 's#exclusions/example-rule.yaml#/app/exclusion/missing.yaml#' "$rule"
           expect_failure "missing packaged exclusion" "${helm_template[@]}"
           sed -i 's#/app/exclusion/missing.yaml#/app/exclusion/example-rule.yaml#' "$rule"

@@ -11,7 +11,7 @@ The examples cover two optional handoff patterns.
 
 For light local detection over a completed input, let Tenzir read a file and
 write bounded NDJSON directly to Venator's built-in stdin source. The Venator
-rule's CEL expression selects high-severity events:
+rule's CEL query selects high-severity events:
 
 ```sh
 set -o pipefail # bash/zsh: preserve both Tenzir and Venator failures

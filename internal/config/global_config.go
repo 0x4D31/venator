@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -32,6 +33,7 @@ type GlobalConfig struct {
 	PubSub     PubSubConnectors     `yaml:"pubsub"`
 	BigQuery   BigQueryConnectors   `yaml:"bigquery"`
 	ClickHouse ClickHouseConnectors `yaml:"clickhouse"`
+	NDJSON     NDJSONConnectors     `yaml:"ndjson"`
 	Slack      SlackConnectors      `yaml:"slack"`
 	Webhook    WebhookConnectors    `yaml:"webhook"`
 	LLM        LLMConfig            `yaml:"llm"`
@@ -56,6 +58,17 @@ type SlackConnectors struct {
 
 type ClickHouseConnectors struct {
 	Instances map[string]ClickHouseConfig `yaml:"instances"`
+}
+
+type NDJSONConnectors struct {
+	Instances map[string]NDJSONConfig `yaml:"instances"`
+}
+
+// NDJSONConfig binds a logical source name to one finite NDJSON snapshot.
+// baseDir records the global config's location without exposing it in YAML.
+type NDJSONConfig struct {
+	Path    string `yaml:"path"`
+	baseDir string
 }
 
 type WebhookConnectors struct {
@@ -210,6 +223,14 @@ func ParseGlobalConfig(path string) (*GlobalConfig, error) {
 	if err := validateEnvironmentReferenceSyntax(&cfg); err != nil {
 		return nil, fmt.Errorf("invalid global config: %w", err)
 	}
+	baseDir, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("resolve global config directory: %w", err)
+	}
+	for name, instance := range cfg.NDJSON.Instances {
+		instance.baseDir = baseDir
+		cfg.NDJSON.Instances[name] = instance
+	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid global config: %w", err)
@@ -258,6 +279,8 @@ func validateResolvedConnectorConfig(value any) error {
 		return validatePubSubConfig(*cfg)
 	case *BigQueryConfig:
 		return validateBigQueryConfig(*cfg)
+	case *NDJSONConfig:
+		return validateNDJSONPath(cfg.Path)
 	default:
 		return nil
 	}
@@ -299,6 +322,9 @@ func walkEnvironmentValues(value reflect.Value, expand bool, missing map[string]
 		}
 	case reflect.Struct:
 		for i := 0; i < value.NumField(); i++ {
+			if value.Type().Field(i).PkgPath != "" {
+				continue
+			}
 			if !walkEnvironmentValues(value.Field(i), expand, missing) {
 				return false
 			}
@@ -462,6 +488,14 @@ func (c *GlobalConfig) Validate() error {
 	if err := validateConnectorInstanceNames("clickhouse", c.ClickHouse.Instances); err != nil {
 		return err
 	}
+	if err := validateConnectorInstanceNames("ndjson", c.NDJSON.Instances); err != nil {
+		return err
+	}
+	for name, instance := range c.NDJSON.Instances {
+		if err := validateNDJSONPath(instance.Path); err != nil {
+			return fmt.Errorf("ndjson instance %q %w", name, err)
+		}
+	}
 	for name, instance := range c.OpenSearch.Instances {
 		if strings.TrimSpace(instance.URL) == "" {
 			return fmt.Errorf("opensearch instance %q requires url", name)
@@ -548,6 +582,38 @@ func (c *GlobalConfig) Validate() error {
 		if !instance.TLS.Enabled && (instance.TLS.ServerName != "" || instance.TLS.CAFile != "" || instance.TLS.CertFile != "" || instance.TLS.KeyFile != "" || instance.TLS.InsecureSkipVerify) {
 			return fmt.Errorf("clickhouse instance %q sets TLS options while tls.enabled is false", name)
 		}
+	}
+	return nil
+}
+
+// ResolvePath expands the selected profile lazily and anchors relative values
+// to the global configuration file, never the process working directory.
+func (c NDJSONConfig) ResolvePath() (string, error) {
+	resolved := c
+	if err := ResolveEnv(&resolved); err != nil {
+		return "", err
+	}
+	if filepath.IsAbs(resolved.Path) {
+		return filepath.Clean(resolved.Path), nil
+	}
+	return filepath.Clean(filepath.Join(c.baseDir, resolved.Path)), nil
+}
+
+func validateNDJSONPath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("requires path")
+	}
+	if strings.TrimSpace(path) != path {
+		return errors.New("path must not have leading or trailing whitespace")
+	}
+	if strings.ContainsRune(path, '\x00') {
+		return errors.New("path must not contain NUL")
+	}
+	if strings.ContainsAny(path, "*?[") {
+		return errors.New("path must name one file, not a glob")
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+		return errors.New("path must not use ~; use ${HOME} explicitly")
 	}
 	return nil
 }

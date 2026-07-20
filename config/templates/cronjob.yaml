@@ -9,20 +9,20 @@
 {{- if and (hasKey $cfg "schedule") (not (kindIs "string" $cfg.schedule)) }}
 {{- fail (printf "rule %s schedule must be a string" $cfg.name) }}
 {{- end }}
-{{- if and (hasKey $cfg "exclusionsPath") (not (kindIs "string" $cfg.exclusionsPath)) }}
-{{- fail (printf "rule %s exclusionsPath must be a string" $cfg.name) }}
+{{- if and (hasKey $cfg "exclusionsFile") (not (kindIs "string" $cfg.exclusionsFile)) }}
+{{- fail (printf "rule %s exclusionsFile must be a string" $cfg.name) }}
 {{- end }}
-{{- $exclusionPath := default "" $cfg.exclusionsPath }}
-{{- if $exclusionPath }}
-{{- if not (regexMatch "^/app/exclusion/[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.yaml$" $exclusionPath) }}
-{{- fail (printf "rule %s exclusionsPath must be exactly /app/exclusion/<packaged-name>.yaml" $cfg.name) }}
+{{- $exclusionsFile := default "" $cfg.exclusionsFile }}
+{{- if $exclusionsFile }}
+{{- if not (regexMatch "^/app/exclusion/[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.yaml$" $exclusionsFile) }}
+{{- fail (printf "rule %s exclusionsFile must be exactly /app/exclusion/<packaged-name>.yaml" $cfg.name) }}
 {{- end }}
-{{- $packagedExclusion := printf "exclusions/%s" ($exclusionPath | base) }}
+{{- $packagedExclusion := printf "exclusions/%s" ($exclusionsFile | base) }}
 {{- if eq (len ($.Files.Glob $packagedExclusion)) 0 }}
-{{- fail (printf "rule %s exclusionsPath %q does not match packaged file %s" $cfg.name $exclusionPath $packagedExclusion) }}
+{{- fail (printf "rule %s exclusionsFile %q does not match packaged file %s" $cfg.name $exclusionsFile $packagedExclusion) }}
 {{- end }}
 {{- end }}
-{{- $exclusionName := $exclusionPath | base | trimSuffix ".yaml" }}
+{{- $exclusionName := $exclusionsFile | base | trimSuffix ".yaml" }}
 {{- $ruleSecretEnv := default (list) (get $.Values.ruleSecretEnv $cfg.name) }}
 {{- $allSecretEnv := concat $.Values.secretEnv $ruleSecretEnv }}
 {{- $envNames := dict }}
@@ -175,7 +175,7 @@ spec:
                 - name: config-volume
                   mountPath: /app/config
                   readOnly: true
-                {{- if $exclusionPath }}
+                {{- if $exclusionsFile }}
                 - name: exclusion-volume
                   mountPath: /app/exclusion
                   readOnly: true
@@ -192,7 +192,7 @@ spec:
             - name: config-volume
               configMap:
                 name: global-config
-            {{- if $exclusionPath }}
+            {{- if $exclusionsFile }}
             - name: exclusion-volume
               configMap:
                 name: {{ printf "%s-exclusion" $exclusionName | quote }}

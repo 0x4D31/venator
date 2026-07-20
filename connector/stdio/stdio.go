@@ -27,6 +27,7 @@ type Source struct {
 }
 
 type FileSource struct {
+	path          string
 	maxRecords    int
 	maxTotalBytes int64
 }
@@ -54,19 +55,23 @@ func newSource(reader io.Reader, name string, maxRecords int, maxTotalBytes int6
 	}
 }
 
-func NewFileSource(maxRecords int, maxTotalBytes int64) *FileSource {
-	return &FileSource{maxRecords: maxRecords, maxTotalBytes: maxTotalBytes}
+func NewFileSource(path string, maxRecords int, maxTotalBytes int64) *FileSource {
+	return &FileSource{path: path, maxRecords: maxRecords, maxTotalBytes: maxTotalBytes}
 }
 
 func (s *FileSource) Query(ctx context.Context, rule *config.RuleConfig) ([]model.Record, error) {
-	if rule == nil || rule.Query == "" {
-		return nil, fmt.Errorf("file NDJSON source requires a path in rule.query")
+	if s == nil || s.path == "" {
+		return nil, fmt.Errorf("NDJSON source path is empty")
 	}
-	file, err := openRegularFile(rule.Query)
+	file, err := openRegularFile(s.path)
 	if err != nil {
 		return nil, err
 	}
-	source := newSource(file, "file.ndjson", s.maxRecords, s.maxTotalBytes)
+	name := "NDJSON source"
+	if rule != nil && rule.Source != "" {
+		name = rule.Source
+	}
+	source := newSource(file, name, s.maxRecords, s.maxTotalBytes)
 	records, queryErr := source.Query(ctx, rule)
 	closeErr := file.Close()
 	if errors.Is(closeErr, os.ErrClosed) {
@@ -94,7 +99,7 @@ func openRegularFile(path string) (*os.File, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("NDJSON file %q must be a regular file (use stdin.default for streams)", path)
 	}
-	file, err := os.Open(path) // #nosec G304 -- rule.query explicitly selects the local input file.
+	file, err := os.Open(path) // #nosec G304 -- the selected source profile explicitly names this file.
 	if err != nil {
 		return nil, fmt.Errorf("open NDJSON file %q: %w", path, err)
 	}

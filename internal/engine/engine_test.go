@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,9 +74,42 @@ func (r fakeRegistry) GetPublisher(name string) (connector.Publisher, error) {
 func testRule() *config.RuleConfig {
 	return &config.RuleConfig{
 		Name: "test", UID: "rule-1", Status: "stable", Confidence: config.ConfidenceHigh,
-		Enabled: true, QueryEngine: "fake", Language: "SQL", Query: "select 1",
+		Enabled: true, Source: "fake", Language: "SQL", Query: "select 1",
 		Publishers: []string{"required"}, Output: config.Output{Format: config.OutputFormatRaw},
 	}
+}
+
+func TestValidateExclusionsResolvesPaths(t *testing.T) {
+	dir := t.TempDir()
+	exclusionsPath := filepath.Join(dir, "exclusions.yaml")
+	if err := os.WriteFile(exclusionsPath, []byte("- name: test\n  when: \"true\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rulePath := filepath.Join(dir, "rule.yaml")
+
+	t.Run("relative to rule", func(t *testing.T) {
+		rule := testRule()
+		rule.ExclusionsFile = "exclusions.yaml"
+		if err := ValidateExclusions(rulePath, rule); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("absolute", func(t *testing.T) {
+		rule := testRule()
+		rule.ExclusionsFile = exclusionsPath
+		if err := ValidateExclusions(rulePath, rule); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("missing relative file", func(t *testing.T) {
+		rule := testRule()
+		rule.ExclusionsFile = "missing.yaml"
+		if err := ValidateExclusions(rulePath, rule); err == nil || !strings.Contains(err.Error(), "relative to rule") {
+			t.Fatalf("ValidateExclusions() error = %v, want rule-relative path error", err)
+		}
+	})
 }
 
 func TestRunReturnsErrorWhenRequiredSinkFails(t *testing.T) {
@@ -225,24 +259,20 @@ func TestRunEnforcesRuntimeByteLimitBeforePublishing(t *testing.T) {
 func TestRunEvaluatesLocalNDJSONExpressionBeforeExclusions(t *testing.T) {
 	dir := t.TempDir()
 	exclusions := filepath.Join(dir, "exclusions.yaml")
-	if err := os.WriteFile(exclusions, []byte(`- conditions:
-    and:
-      - field: suppress
-        operator: equals
-        value: "yes"
+	if err := os.WriteFile(exclusions, []byte(`- name: known-noise
+  when: has(event.suppress) && event.suppress == "yes"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	var batches []model.PublishBatch
 	rule := testRule()
-	rule.QueryEngine = "file.ndjson"
-	rule.Language = "NDJSON"
-	rule.Query = "events.ndjson"
-	rule.Expr = stringPointer(`event.detect == true`)
-	rule.ExclusionsPath = exclusions
+	rule.Source = "ndjson.events"
+	rule.Language = "CEL"
+	rule.Query = `event.detect == true`
+	rule.ExclusionsFile = exclusions
 	registry := fakeRegistry{
-		sources: map[string]connector.QueryRunner{"file.ndjson": fakeSource{records: []model.Record{
+		sources: map[string]connector.QueryRunner{"ndjson.events": fakeSource{records: []model.Record{
 			{"id": "not-matched", "detect": false, "suppress": "yes"},
 			{"id": "excluded", "detect": true, "suppress": "yes"},
 			{"id": "finding", "detect": true, "suppress": "no"},
@@ -268,19 +298,71 @@ func TestRunEvaluatesLocalNDJSONExpressionBeforeExclusions(t *testing.T) {
 func TestRunExpressionErrorPreventsPublication(t *testing.T) {
 	var batches []model.PublishBatch
 	rule := testRule()
-	rule.QueryEngine = "stdin.default"
-	rule.Language = "NDJSON"
-	rule.Query = ""
-	rule.Expr = stringPointer(`event.kind == "failed_login"`)
+	rule.Source = "stdin.default"
+	rule.Language = "CEL"
+	rule.Query = `event.kind == "failed_login"`
 	registry := fakeRegistry{
 		sources: map[string]connector.QueryRunner{"stdin.default": fakeSource{records: []model.Record{{"message": "missing event"}}}},
 		sinks:   map[string]connector.Publisher{"required": fakeSink{batches: &batches}},
 	}
 	report, err := Run(context.Background(), registry, rule, Options{Now: fixedClock()})
-	if err == nil || !strings.Contains(err.Error(), "evaluate expr for source record 1") {
+	if err == nil || !strings.Contains(err.Error(), "evaluate CEL query for source record 1") {
 		t.Fatalf("error = %v", err)
 	}
 	if report.Status != "failed" || report.Queried != 1 || report.Matched != 0 || len(batches) != 0 {
+		t.Fatalf("report/batches = %#v %#v", report, batches)
+	}
+}
+
+func TestRunAppliesCELExclusionsToConnectorNativeValues(t *testing.T) {
+	dir := t.TempDir()
+	exclusions := filepath.Join(dir, "exclusions.yaml")
+	if err := os.WriteFile(exclusions, []byte(`- name: expected native values
+  when: |
+    event.timestamp == "2026-07-20T12:34:56Z" &&
+    event.bytes == "AQI=" &&
+    event.ratio == "1/3"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rule := testRule()
+	rule.ExclusionsFile = exclusions
+	registry := fakeRegistry{sources: map[string]connector.QueryRunner{"fake": fakeSource{records: []model.Record{{
+		"timestamp": time.Date(2026, time.July, 20, 12, 34, 56, 0, time.UTC),
+		"bytes":     []byte{1, 2},
+		"ratio":     big.NewRat(1, 3),
+	}}}}}
+	report, err := Run(context.Background(), registry, rule, Options{Now: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Queried != 1 || report.Matched != 1 || report.Excluded != 1 || report.Findings != 0 {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestRunExclusionEvaluationErrorPreventsPublication(t *testing.T) {
+	dir := t.TempDir()
+	exclusions := filepath.Join(dir, "exclusions.yaml")
+	if err := os.WriteFile(exclusions, []byte(`- name: unguarded field
+  when: event.missing == "value"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var batches []model.PublishBatch
+	rule := testRule()
+	rule.ExclusionsFile = exclusions
+	registry := fakeRegistry{
+		sources: map[string]connector.QueryRunner{"fake": fakeSource{records: []model.Record{{"kind": "login"}}}},
+		sinks:   map[string]connector.Publisher{"required": fakeSink{batches: &batches}},
+	}
+	report, err := Run(context.Background(), registry, rule, Options{Now: fixedClock()})
+	if err == nil || !strings.Contains(err.Error(), `evaluate exclusion "unguarded field"`) {
+		t.Fatalf("error = %v", err)
+	}
+	if report.Status != "failed" || len(batches) != 0 {
 		t.Fatalf("report/batches = %#v %#v", report, batches)
 	}
 }
@@ -623,5 +705,3 @@ func fixedClock() func() time.Time {
 	current := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	return func() time.Time { current = current.Add(time.Millisecond); return current }
 }
-
-func stringPointer(value string) *string { return &value }

@@ -18,11 +18,10 @@ uid: rule-1
 status: stable
 confidence: high
 enabled: true
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
-expr: event.count >= 2
+language: CEL
+query: event.count >= 2
 output:
   format: raw
   fields: []
@@ -59,7 +58,7 @@ uid: rule-1
 status: stable
 confidence: high
 enabled: true
-queryEngine: missing.source
+source: missing.source
 publishers: [stdout.default]
 language: SQL
 query: SELECT 1
@@ -81,10 +80,10 @@ func TestValidateWritesSuccessOnlyToStdout(t *testing.T) {
 uid: rule-1
 confidence: high
 enabled: true
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 `)
 	var stdout, stderr bytes.Buffer
@@ -101,10 +100,10 @@ func TestRunReportsNoFindingsWithoutPollutingStdout(t *testing.T) {
 uid: rule-1
 confidence: low
 enabled: true
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 `)
 	var stdout, stderr bytes.Buffer
@@ -122,10 +121,10 @@ uid: rule-1
 status: stable
 confidence: low
 enabled: false
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output:
   format: raw
   fields: []
@@ -145,10 +144,10 @@ uid: rule-1
 status: stable
 confidence: low
 enabled: false
-queryEngine: file.ndjson
+source: ndjson.missing
 publishers: [missing.publisher]
-language: NDJSON
-query: missing.ndjson
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 llm:
   enabled: true
@@ -259,10 +258,10 @@ func TestErrorLogLevelKeepsRuntimeFailuresVisible(t *testing.T) {
 uid: rule-1
 confidence: low
 enabled: true
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 `)
 	var stdout, stderr bytes.Buffer
@@ -287,10 +286,10 @@ uid: rule-1
 status: stable
 confidence: low
 enabled: true
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 `)
 	var stdout, stderr bytes.Buffer
@@ -315,10 +314,10 @@ uid: rule-1
 status: stable
 confidence: low
 enabled: true
-queryEngine: stdin.default
+source: stdin.default
 publishers: [slack.alerts]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 `)
 	var stderr bytes.Buffer
@@ -336,11 +335,11 @@ uid: rule-1
 status: stable
 confidence: low
 enabled: true
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
 bestEffortPublishers: [missing.optional]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 `)
 	var stdout, stderr bytes.Buffer
@@ -360,16 +359,23 @@ output: {format: raw, fields: []}
 
 func TestValidateRejectsMissingFileSource(t *testing.T) {
 	dir := t.TempDir()
-	global := writeTestFile(t, dir, "global.yaml", "runtime:\n  maxRecords: 10\n  timeout: 1m\n")
+	global := writeTestFile(t, dir, "global.yaml", `runtime:
+  maxRecords: 10
+  timeout: 1m
+ndjson:
+  instances:
+    events:
+      path: missing.ndjson
+`)
 	rule := writeTestFile(t, dir, "rule.yaml", `name: local
 uid: rule-1
 status: stable
 confidence: low
 enabled: true
-queryEngine: file.ndjson
+source: ndjson.events
 publishers: [stdout.default]
-language: NDJSON
-query: missing.ndjson
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 `)
 	var stderr bytes.Buffer
@@ -393,10 +399,10 @@ uid: rule-1
 status: stable
 confidence: high
 enabled: true
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output:
   format: raw
   fields: []
@@ -431,10 +437,10 @@ uid: rule-1
 status: stable
 confidence: high
 enabled: true
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output:
   format: raw
   fields: []

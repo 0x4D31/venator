@@ -6,11 +6,11 @@ status: stable
 confidence: high
 enabled: false
 schedule: "5 * * * *"
-queryEngine: stdin.default
+source: stdin.default
 publishers:
   - stdout.default
-language: NDJSON
-expr: has(event.severity) && event.severity >= 5
+language: CEL
+query: has(event.severity) && event.severity >= 5
 output:
   format: raw
 description: Detect high-severity events from a bounded local NDJSON producer.

@@ -476,14 +476,14 @@ func testBatch() model.PublishBatch {
 	return model.PublishBatch{
 		RunID:      "run-1",
 		DetectedAt: detectedAt,
-		Source:     "file.ndjson",
+		Source:     "ndjson.events",
 		Rule:       rule,
 		Findings: []model.Finding{{
 			SchemaVersion: model.FindingSchemaVersion,
 			ID:            "finding-1",
 			RunID:         "run-1",
 			DetectedAt:    detectedAt,
-			Source:        "file.ndjson",
+			Source:        "ndjson.events",
 			OutputFormat:  "signal",
 			Rule:          rule,
 			Payload:       map[string]any{"event": "login", "success": false},

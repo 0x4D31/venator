@@ -64,8 +64,8 @@ func NewRegistry(ctx context.Context, globalCfg *config.GlobalConfig, stdin io.R
 		publisherInitializations: make(map[string]*publisherInitialization),
 	}
 	r.queryRunners["stdin.default"] = stdio.NewSource(stdin, globalCfg.Runtime.MaxRecords, globalCfg.Runtime.MaxBytes)
-	r.queryRunners["file.ndjson"] = stdio.NewFileSource(globalCfg.Runtime.MaxRecords, globalCfg.Runtime.MaxBytes)
 	r.publishers["stdout.default"] = stdio.NewSink(stdout)
+	r.registerNDJSON(globalCfg.NDJSON, globalCfg.Runtime.MaxRecords, globalCfg.Runtime.MaxBytes)
 	r.registerOpenSearch(globalCfg.OpenSearch, globalCfg.Runtime.MaxRecords, globalCfg.Runtime.MaxBytes)
 	r.registerPubSub(globalCfg.PubSub)
 	r.registerBigQuery(globalCfg.BigQuery, globalCfg.Runtime.MaxRecords, globalCfg.Runtime.MaxBytes)
@@ -73,6 +73,40 @@ func NewRegistry(ctx context.Context, globalCfg *config.GlobalConfig, stdin io.R
 	r.registerSlack(globalCfg.Slack)
 	r.registerWebhook(globalCfg.Webhook)
 	return r
+}
+
+func (r *Registry) registerNDJSON(connectors config.NDJSONConnectors, maxRecords int, maxBytes int64) {
+	for name, value := range connectors.Instances {
+		cfg := value
+		instance := "ndjson." + name
+		resolve := func() (string, error) {
+			path, err := cfg.ResolvePath()
+			if err != nil {
+				return "", err
+			}
+			return path, nil
+		}
+		r.queryValidators[instance] = func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			path, err := resolve()
+			if err != nil {
+				return err
+			}
+			return stdio.ValidateFile(path)
+		}
+		r.queryFactories[instance] = func(ctx context.Context) (QueryRunner, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			path, err := resolve()
+			if err != nil {
+				return nil, err
+			}
+			return stdio.NewFileSource(path, maxRecords, maxBytes), nil
+		}
+	}
 }
 
 func (r *Registry) registerClickHouse(connectors config.ClickHouseConnectors) {
@@ -321,13 +355,13 @@ func (r *Registry) GetQueryRunner(name string) (QueryRunner, error) {
 	factory, ok := r.queryFactories[name]
 	if !ok {
 		r.mu.Unlock()
-		return nil, fmt.Errorf("query runner %q not found", name)
+		return nil, fmt.Errorf("source %q not found", name)
 	}
 	if pending, ok := r.queryInitializations[name]; ok {
 		r.mu.Unlock()
 		<-pending.done
 		if pending.err != nil {
-			return nil, fmt.Errorf("initialize query runner %q: %w", name, pending.err)
+			return nil, fmt.Errorf("initialize source %q: %w", name, pending.err)
 		}
 		return pending.source, nil
 	}
@@ -350,7 +384,7 @@ func (r *Registry) GetQueryRunner(name string) (QueryRunner, error) {
 	}
 	r.mu.Unlock()
 	if err != nil {
-		err = r.closeFailedInitialization("query runner", name, source, err)
+		err = r.closeFailedInitialization("source", name, source, err)
 	}
 	r.mu.Lock()
 	pending.source = source
@@ -359,7 +393,7 @@ func (r *Registry) GetQueryRunner(name string) (QueryRunner, error) {
 	close(pending.done)
 	r.mu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("initialize query runner %q: %w", name, err)
+		return nil, fmt.Errorf("initialize source %q: %w", name, err)
 	}
 	return source, nil
 }
@@ -443,9 +477,9 @@ func (r *Registry) validateReferences(rule *config.RuleConfig, includeBestEffort
 	if rule == nil {
 		return fmt.Errorf("rule is nil")
 	}
-	if _, ready := r.queryRunners[rule.QueryEngine]; !ready {
-		if _, configured := r.queryFactories[rule.QueryEngine]; !configured {
-			return fmt.Errorf("query runner %q is not configured", rule.QueryEngine)
+	if _, ready := r.queryRunners[rule.Source]; !ready {
+		if _, configured := r.queryFactories[rule.Source]; !configured {
+			return fmt.Errorf("source %q is not configured", rule.Source)
 		}
 	}
 	publishers := rule.Publishers
@@ -481,7 +515,7 @@ func (r *Registry) preflightRule(rule *config.RuleConfig, includeBestEffort bool
 		return err
 	}
 	r.mu.Lock()
-	queryValidator := r.queryValidators[rule.QueryEngine]
+	queryValidator := r.queryValidators[rule.Source]
 	publishers := append([]string(nil), rule.Publishers...)
 	if includeBestEffort {
 		publishers = append(publishers, rule.BestEffortPublishers...)
@@ -493,7 +527,7 @@ func (r *Registry) preflightRule(rule *config.RuleConfig, includeBestEffort bool
 	r.mu.Unlock()
 	if queryValidator != nil {
 		if err := queryValidator(r.ctx); err != nil {
-			return fmt.Errorf("preflight query runner %q: %w", rule.QueryEngine, err)
+			return fmt.Errorf("preflight source %q: %w", rule.Source, err)
 		}
 	}
 	for _, name := range publishers {

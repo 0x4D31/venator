@@ -4,8 +4,8 @@ status: test
 confidence: low
 enabled: true
 schedule: "0 */2 * * *"
-queryEngine: opensearch.dev
-exclusionsPath: test-exclusions.yaml
+source: opensearch.dev
+exclusionsFile: test-exclusions.yaml
 publishers:
   - opensearch.dev
   - stdout.default

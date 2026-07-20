@@ -41,7 +41,7 @@ install -m 0600 deploy/examples/global.yaml \
 install -m 0600 deploy/examples/rule.yaml \
   "$HOME/.config/venator/rules/example.yaml"
 install -m 0600 deploy/examples/events.ndjson \
-  "$HOME/.config/venator/rules/events.ndjson"
+  "$HOME/.config/venator/events.ndjson"
 ```
 
 Run the rule immediately:
@@ -58,9 +58,10 @@ preserve the exit status. Use [`../launchd/`](../launchd/) on macOS or
 [`../systemd/`](../systemd/) on Linux when the operating system should own the
 schedule and retries.
 
-The sample exercises the finite `file.ndjson` source. It rereads the snapshot
-on every invocation and applies the rule's CEL expression to each event. Stable
-finding IDs help idempotent sinks, but the source does not own a read offset.
+The sample exercises the finite `ndjson.local-events` source. Its profile path
+is relative to the global YAML. Venator rereads the snapshot on every
+invocation and applies the rule's CEL query to each event. Stable finding IDs
+help idempotent sinks, but the source does not own a read offset.
 
 For continuously growing files or journald, use a checkpointing collector and
 hand Venator completed event or candidate batches. Do not use

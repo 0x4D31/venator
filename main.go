@@ -174,8 +174,8 @@ func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) i
 			fmt.Fprintf(stderr, "invalid connector configuration: %v\n", err)
 			return 2
 		}
-		if err := engine.ValidateRuleFiles(opts.rulePath, rule); err != nil {
-			fmt.Fprintf(stderr, "invalid rule file reference: %v\n", err)
+		if err := engine.ValidateExclusions(opts.rulePath, rule); err != nil {
+			fmt.Fprintf(stderr, "invalid exclusion configuration: %v\n", err)
 			return 2
 		}
 	}
@@ -287,8 +287,8 @@ func validateCommand(arguments []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "invalid LLM reviewer configuration: %v\n", err)
 		return 2
 	}
-	if err := engine.ValidateRuleFiles(opts.rulePath, rule); err != nil {
-		fmt.Fprintf(stderr, "invalid rule file reference: %v\n", err)
+	if err := engine.ValidateExclusions(opts.rulePath, rule); err != nil {
+		fmt.Fprintf(stderr, "invalid exclusion configuration: %v\n", err)
 		return 2
 	}
 	fmt.Fprintln(stdout, "configuration is valid")

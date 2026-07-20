@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/0x4D31/venator/connector"
-	"github.com/0x4D31/venator/connector/stdio"
 	"github.com/0x4D31/venator/internal/config"
 	"github.com/0x4D31/venator/internal/exclusion"
 	"github.com/0x4D31/venator/internal/model"
@@ -95,20 +94,20 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		return report, err
 	}
 
-	source, err := registry.GetQueryRunner(rule.QueryEngine)
+	source, err := registry.GetQueryRunner(rule.Source)
 	if err != nil {
-		return report, fmt.Errorf("get source %q: %w", rule.QueryEngine, err)
+		return report, fmt.Errorf("get source %q: %w", rule.Source, err)
 	}
 	records, err := source.Query(ctx, rule)
 	if err != nil {
-		return report, fmt.Errorf("query source %q: %w", rule.QueryEngine, err)
+		return report, fmt.Errorf("query source %q: %w", rule.Source, err)
 	}
 	report.Queried = len(records)
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
 	if opts.MaxRecords > 0 && len(records) > opts.MaxRecords {
-		return report, fmt.Errorf("source %q returned %d records; runtime limit is %d", rule.QueryEngine, len(records), opts.MaxRecords)
+		return report, fmt.Errorf("source %q returned %d records; runtime limit is %d", rule.Source, len(records), opts.MaxRecords)
 	}
 	var sourceBytes int64
 	for i, record := range records {
@@ -121,7 +120,7 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		}
 		sourceBytes += int64(len(encoded))
 		if opts.MaxBytes > 0 && sourceBytes > opts.MaxBytes {
-			return report, fmt.Errorf("source %q returned more than %d encoded bytes", rule.QueryEngine, opts.MaxBytes)
+			return report, fmt.Errorf("source %q returned more than %d encoded bytes", rule.Source, opts.MaxBytes)
 		}
 	}
 
@@ -130,17 +129,33 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
-		matched, err := detectionPredicate.Match(ctx, record)
-		if err != nil {
-			return report, fmt.Errorf("evaluate expr for source record %d: %w", i+1, err)
+		matched := true
+		var event map[string]any
+		if detectionPredicate != nil || excluder != nil {
+			event, err = predicate.Prepare(ctx, record)
+			if err != nil {
+				return report, fmt.Errorf("prepare source record %d for CEL: %w", i+1, err)
+			}
+		}
+		if detectionPredicate != nil {
+			matched, err = detectionPredicate.MatchPrepared(ctx, event)
+			if err != nil {
+				return report, fmt.Errorf("evaluate CEL query for source record %d: %w", i+1, err)
+			}
 		}
 		if !matched {
 			continue
 		}
 		report.Matched++
-		if excluder != nil && excluder.IsExcluded(record) {
-			report.Excluded++
-			continue
+		if excluder != nil {
+			excluded, err := excluder.IsExcluded(ctx, event)
+			if err != nil {
+				return report, fmt.Errorf("evaluate exclusions for source record %d: %w", i+1, err)
+			}
+			if excluded {
+				report.Excluded++
+				continue
+			}
 		}
 		retained = append(retained, record)
 	}
@@ -196,7 +211,7 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		}
 		finding := model.Finding{
 			SchemaVersion: model.FindingSchemaVersion, ID: id, RunID: runID,
-			DetectedAt: detectedAt, Source: rule.QueryEngine,
+			DetectedAt: detectedAt, Source: rule.Source,
 			OutputFormat: string(rule.Output.Format), Rule: metadata, Payload: payload,
 		}
 		if sig, ok := payload.(*signal.Signal); ok {
@@ -254,7 +269,7 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		return report, nil
 	}
 
-	batch := model.PublishBatch{RunID: runID, DetectedAt: detectedAt, Source: rule.QueryEngine, Rule: metadata, Findings: findings}
+	batch := model.PublishBatch{RunID: runID, DetectedAt: detectedAt, Source: rule.Source, Rule: metadata, Findings: findings}
 	type sinkSpec struct {
 		name     string
 		required bool
@@ -314,18 +329,15 @@ type identityOwner struct {
 }
 
 func compileDetectionExpression(rule *config.RuleConfig) (*predicate.Predicate, error) {
-	if rule.Expr == nil {
+	if !strings.EqualFold(strings.TrimSpace(rule.Language), "CEL") {
 		return nil, nil
 	}
-	if strings.TrimSpace(*rule.Expr) == "" {
-		return nil, fmt.Errorf("expr cannot be empty")
+	if strings.TrimSpace(rule.Query) == "" {
+		return nil, fmt.Errorf("CEL query cannot be empty")
 	}
-	if rule.QueryEngine != "stdin.default" && rule.QueryEngine != "file.ndjson" {
-		return nil, fmt.Errorf("expr is supported only for local NDJSON sources")
-	}
-	compiled, err := predicate.Compile(*rule.Expr)
+	compiled, err := predicate.Compile(rule.Query)
 	if err != nil {
-		return nil, fmt.Errorf("compile rule expr: %w", err)
+		return nil, fmt.Errorf("compile CEL query: %w", err)
 	}
 	return compiled, nil
 }
@@ -363,28 +375,22 @@ func measureFindings(ctx context.Context, findings []model.Finding, maxBytes int
 	return ctx.Err()
 }
 
-// ValidateRuleFiles validates static local file references without querying a
-// source.
-func ValidateRuleFiles(rulePath string, rule *config.RuleConfig) error {
+// ValidateExclusions resolves and compiles a rule's optional exclusion file.
+func ValidateExclusions(rulePath string, rule *config.RuleConfig) error {
 	if rule == nil {
 		return fmt.Errorf("rule is nil")
 	}
 	if _, err := loadExcluder(rulePath, rule); err != nil {
 		return err
 	}
-	if rule.QueryEngine == "file.ndjson" {
-		if err := stdio.ValidateFile(rule.Query); err != nil {
-			return fmt.Errorf("validate file.ndjson source: %w", err)
-		}
-	}
 	return nil
 }
 
 func loadExcluder(rulePath string, rule *config.RuleConfig) (*exclusion.Excluder, error) {
-	if rule == nil || rule.ExclusionsPath == "" {
+	if rule == nil || rule.ExclusionsFile == "" {
 		return nil, nil
 	}
-	path, err := resolveRulePath(rulePath, rule.ExclusionsPath)
+	path, err := resolveExclusionsFile(rulePath, rule.ExclusionsFile)
 	if err != nil {
 		return nil, err
 	}
@@ -499,22 +505,22 @@ func populateSignalFields(finding *model.Finding, sig *signal.Signal) {
 	}
 }
 
-func resolveRulePath(rulePath, referenced string) (string, error) {
+func resolveExclusionsFile(rulePath, referenced string) (string, error) {
 	if filepath.IsAbs(referenced) {
 		if _, err := os.Stat(referenced); err != nil {
-			return "", fmt.Errorf("resolve exclusions path %q: %w", referenced, err)
+			return "", fmt.Errorf("resolve exclusions file %q: %w", referenced, err)
 		}
 		return referenced, nil
 	}
 	if rulePath != "" {
 		candidate := filepath.Join(filepath.Dir(rulePath), referenced)
 		if _, err := os.Stat(candidate); err != nil {
-			return "", fmt.Errorf("resolve exclusions path %q relative to rule %q: %w", referenced, rulePath, err)
+			return "", fmt.Errorf("resolve exclusions file %q relative to rule %q: %w", referenced, rulePath, err)
 		}
 		return candidate, nil
 	}
 	if _, err := os.Stat(referenced); err != nil {
-		return "", fmt.Errorf("resolve exclusions path %q: %w", referenced, err)
+		return "", fmt.Errorf("resolve exclusions file %q: %w", referenced, err)
 	}
 	return referenced, nil
 }

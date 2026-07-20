@@ -3,11 +3,10 @@ uid: 971e4c6f-f7b8-42a6-a2ce-c592ad5f1fd4
 status: example
 confidence: low
 enabled: true
-queryEngine: file.ndjson
+source: ndjson.review-events
 publishers: [stdout.default]
-language: NDJSON
-query: ./events.ndjson
-expr: event.severity >= 5
+language: CEL
+query: event.severity >= 5
 output:
   format: raw
 description: Detect and review high-severity events in the bundled snapshot.

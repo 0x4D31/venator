@@ -5,5 +5,11 @@ runtime:
 
 ndjson:
   instances:
-    local-events:
+    review-events:
       path: ./events.ndjson
+
+llm:
+  provider: openai
+  apiKey: ${OPENAI_API_KEY}
+  model: ${OPENAI_MODEL}
+  timeout: 30s

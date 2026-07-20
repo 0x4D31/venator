@@ -11,7 +11,7 @@ sudo install -m 0644 deploy/examples/global.yaml /etc/venator/global.yaml
 sudo install -m 0644 deploy/examples/rule.yaml \
   /etc/venator/rules/example.yaml
 sudo install -m 0644 deploy/examples/events.ndjson \
-  /etc/venator/rules/events.ndjson
+  /etc/venator/events.ndjson
 sudo install -m 0644 deploy/systemd/venator@.service \
   deploy/systemd/venator@.timer /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -46,8 +46,9 @@ allows outbound network access and read-only home access. If a local source
 needs a protected directory, grant the narrow path with a unit drop-in instead
 of disabling all sandboxing.
 
-The sample is a real finite-file run, not an empty-stdin placeholder. It reads
-`events.ndjson` next to the rule and selects one event with CEL. Replace both
-files with a production source; for an actively growing log, use an external
+The sample is a real finite-file run, not an empty-stdin placeholder. Its
+global profile reads `events.ndjson` next to the global YAML and the rule
+selects one event with CEL. Replace the profile and rule with a production
+source; for an actively growing log, use an external
 checkpointing collector to manage offsets and rotation instead of rereading an
 unbounded file on every timer.

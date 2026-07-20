@@ -73,8 +73,8 @@ func TestFileSourceReadsFiniteNDJSONSnapshot(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{\"event\":\"login\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	source := NewFileSource(10, 1<<20)
-	records, err := source.Query(context.Background(), &config.RuleConfig{Query: path})
+	source := NewFileSource(path, 10, 1<<20)
+	records, err := source.Query(context.Background(), &config.RuleConfig{Source: "ndjson.events"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,9 +99,9 @@ func TestFileSourceLimitErrorsNameTheFileConnector(t *testing.T) {
 			if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			source := NewFileSource(test.maxRecords, test.maxTotalBytes)
-			_, err := source.Query(context.Background(), &config.RuleConfig{Query: path})
-			if err == nil || !strings.Contains(err.Error(), "file.ndjson") || strings.Contains(err.Error(), "stdin") {
+			source := NewFileSource(path, test.maxRecords, test.maxTotalBytes)
+			_, err := source.Query(context.Background(), &config.RuleConfig{Source: "ndjson.events"})
+			if err == nil || !strings.Contains(err.Error(), "ndjson.events") || strings.Contains(err.Error(), "stdin") {
 				t.Fatalf("error = %v", err)
 			}
 		})
@@ -123,8 +123,8 @@ func TestFileSourceRejectsNonRegularInput(t *testing.T) {
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	source := NewFileSource(10, 1<<20)
-	if _, err := source.Query(context.Background(), &config.RuleConfig{Query: path}); err == nil || !strings.Contains(err.Error(), "regular file") {
+	source := NewFileSource(path, 10, 1<<20)
+	if _, err := source.Query(context.Background(), &config.RuleConfig{Source: "ndjson.events"}); err == nil || !strings.Contains(err.Error(), "regular file") {
 		t.Fatalf("error = %v", err)
 	}
 }

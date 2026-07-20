@@ -4,11 +4,10 @@ status: example
 confidence: low
 enabled: true
 schedule: "5 * * * *"
-queryEngine: file.ndjson
+source: ndjson.local-events
 publishers: [stdout.default]
-language: NDJSON
-query: ./events.ndjson
-expr: event.kind == "failed_login"
+language: CEL
+query: event.kind == "failed_login"
 output:
   format: raw
 description: Detect failed logins in a finite local event snapshot.

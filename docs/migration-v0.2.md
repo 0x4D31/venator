@@ -27,8 +27,9 @@ summary. A disabled rule exits zero without querying; use `--force` for an
 intentional ad-hoc run. Exit code 1 means a run started but failed; exit code 2
 means the command, configuration, preflight, or local rule reference was
 invalid. Findings on stdout remain canonical NDJSON; operational summaries
-remain on stderr. JSON run reports distinguish source `queried`, CEL `matched`,
-exclusion `excluded`, and final `findings` counts.
+remain on stderr. JSON run reports distinguish source `queried`, query-selected
+`matched`, exclusion `excluded`, and final `findings` counts. For SQL and PPL,
+the source performs the selection, so `queried` and `matched` are equal.
 
 ## Configuration
 
@@ -47,11 +48,26 @@ exclusion `excluded`, and final `findings` counts.
   remains literal.
 - `runtime.maxBytes` defaults to 64 MiB alongside `runtime.maxRecords`; tune
   both for the scheduler memory limit and expected result shape.
-- `stdin.default` and `file.ndjson` rules may define a CEL boolean `expr` over
-  the current JSON object as `event`. Omit it for preselected candidates. It is
-  invalid on database and search sources, where SQL or PPL remains the
-  detection expression.
-- `exclusionsPath` may be relative to the rule file for local deployments. Helm
+- Rename every rule's `queryEngine` key to `source`. Connector references remain
+  `<connector>.<instance>`; only the field name changes.
+- `query` remains the rule's detection logic, and `language` is now validated
+  against the selected source: SQL for BigQuery and ClickHouse, SQL or PPL for
+  OpenSearch, and CEL for local NDJSON inputs.
+- Local NDJSON detection is new in v0.2.0. For a finite file, define a named
+  global profile such as `ndjson.instances.events.path: ./events.ndjson` and
+  reference it as `source: ndjson.events`; relative paths resolve from the
+  global configuration directory. For bounded producer output, use
+  `source: stdin.default`. Both forms put a CEL predicate in `query`; use the
+  quoted `query: "true"` only when every input record is already a candidate.
+- Rename `exclusionsPath` to `exclusionsFile`. Exclusion files are now strict
+  lists of `{name, when}` entries, where `when` is a CEL boolean over `event`;
+  convert the legacy `conditions`/operator form before upgrading. CEL uses
+  native values rather than stringifying every field, so use numeric and
+  boolean literals for typed columns and guard optional fields with `has(...)`.
+  Legacy `not_equals` and `not_in` conditions did not match missing or null
+  fields. Preserve that behavior explicitly, for example with `"status" in
+  event && event.status != null && event.status != "active"`.
+  The file may be relative to the rule file for local deployments. Helm
   requires exactly `/app/exclusion/<file>.yaml`, where the file is packaged
   directly under `config/exclusions/`, and mounts it only for rules that
   reference it.

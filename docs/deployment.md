@@ -47,10 +47,10 @@ independent job per rule so failures, deadlines, and retries are observable.
 
 Before deployment, verify that:
 
-- the rule is enabled and its `queryEngine` exactly matches a configured source;
+- the rule is enabled and its `source` exactly matches a configured source;
 - every publisher name exactly matches a configured sink;
 - example placeholders have been replaced with valid queries and endpoints;
-- `exclusionsPath`, when present, points to a file mounted at that exact path;
+- `exclusionsFile`, when present, points to a file mounted at that exact path;
 - the scheduler's interval and the query's time window do not create gaps; and
 - publisher retries cannot create unacceptable duplicate alerts.
 

@@ -14,7 +14,7 @@ local deployment small without inventing unsafe replay or checkpoint behavior.
 Use Venator when its rule-run contract matters:
 
 - one independently scheduled, observable, and rerunnable job per rule;
-- a bounded per-event CEL expression for local NDJSON events;
+- a bounded per-event CEL query for local NDJSON events;
 - a versioned canonical finding schema and explicit evidence identity;
 - exclusions and deterministic output mapping;
 - required and best-effort sink fan-out with delivery receipts;
@@ -31,9 +31,9 @@ unnecessary.
 
 | Need | Recommended boundary |
 | --- | --- |
-| Finite NDJSON event batch | `stdin.default` or `file.ndjson` with a CEL `expr` |
-| Preselected scanner findings | Local NDJSON source with no `expr` |
-| Ad hoc per-event JSON test | Local NDJSON source with a CEL `expr` |
+| Finite NDJSON event batch | `stdin.default` or a named `ndjson.<instance>` source with a CEL query |
+| Preselected scanner findings | Local NDJSON source with `query: "true"` |
+| Ad hoc per-event JSON test | Local NDJSON source with a CEL query |
 | Continuously appended files, rotation, or journald | Checkpointing collector, then completed batches |
 | Parsing, correlation, joins, or windowing | Upstream processor or query store, then bounded events |
 | HTTP event ingestion | Narrow authenticated receiver with a durable queue |
@@ -51,22 +51,25 @@ the producer closes the pipe. Do not use `tail -F ... | venator`: the pipe does
 not reach EOF, so the run eventually times out without becoming a live
 detector.
 
-`file.ndjson` accepts a regular file; operators must point it at a completed
-snapshot. It reads from the beginning on every run and does not remember
-offsets, follow rotations, or wait for appended records.
+An `ndjson.<instance>` profile accepts one regular-file path in global
+configuration; operators must point it at a completed snapshot. A relative
+path resolves from the global YAML. Venator reads from the beginning on every
+run and does not remember offsets, expand globs, follow rotations, or wait for
+appended records.
 
-For both sources, an optional CEL `expr` makes one boolean decision per JSON
-object. For example, `has(event.severity) && event.severity >= 5` selects
-records with a high numeric severity. Omit the expression when every input
-object is already a candidate. Matching records then pass through exclusions;
-the remainder become findings. A missing field or incompatible type that is
-not handled by the expression fails the run before publication.
+For both sources, the rule's required CEL `query` makes one boolean decision
+per JSON object. For example, `has(event.severity) && event.severity >= 5`
+selects records with a high numeric severity. Use the quoted string `"true"`
+when every input object is already a candidate. Matching records then pass
+through exclusions; the remainder become findings. A missing field or
+incompatible type that the query does not handle fails the run before
+publication.
 
 This is deliberately smaller than a log-query engine. It does not parse text,
 transform records, compare one event with another, aggregate, join, or keep a
 time window. Perform those operations in the producer or a bounded database
-query. The [rule reference](rule-reference.md#local-ndjson-expression) defines
-the expression syntax and limits.
+query. The [rule reference](rule-reference.md#local-ndjson-query) defines the
+query syntax and limits.
 
 Preserve both process exit statuses when using a pipe. That reports an upstream
 failure but cannot undo findings published from partial output; stage and
@@ -112,8 +115,8 @@ Completed Bumblebee output and closed Stinger session reports can feed Venator.
 Use a CEL expression when the decision depends only on fields in one JSON
 record; otherwise select actual findings in a bounded upstream step. Project
 stable, top-level identity fields when the producer exposes them. Do not point
-`file.ndjson` at an append-only report; stage the batch first when producer
-success must be atomic with publication.
+an `ndjson.<instance>` profile at an append-only report; stage the batch first
+when producer success must be atomic with publication.
 
 SantaMon already provides detection, queueing, and delivery, so it should
 normally send directly to its backend or automation receiver. Add Venator only

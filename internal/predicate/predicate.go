@@ -1,13 +1,13 @@
-// Package predicate compiles and evaluates bounded CEL detection expressions
-// for local NDJSON events.
+// Package predicate compiles and evaluates bounded CEL predicates over source
+// events.
 package predicate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -21,6 +21,7 @@ const (
 	maxParseErrorRecovery   = 10
 	maxEvaluationCost       = 100_000
 	interruptCheckFrequency = 100
+	maxEventNesting         = 100
 )
 
 // Predicate is a compiled, reusable CEL boolean expression.
@@ -67,11 +68,36 @@ func (p *Predicate) Match(ctx context.Context, record model.Record) (bool, error
 	if p == nil {
 		return true, nil
 	}
-	normalized, err := normalizeMap(ctx, map[string]any(record))
+	event, err := Prepare(ctx, record)
 	if err != nil {
-		return false, fmt.Errorf("normalize JSON record: %w", err)
+		return false, err
 	}
-	value, _, err := p.program.ContextEval(ctx, map[string]any{"event": normalized})
+	return p.MatchPrepared(ctx, event)
+}
+
+// Prepare converts connector-native values into a JSON-shaped CEL event.
+// Values outside CEL's numeric ranges remain lossless strings.
+func Prepare(ctx context.Context, record model.Record) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	normalized, err := normalizeMap(ctx, map[string]any(record), 0)
+	if err != nil {
+		return nil, fmt.Errorf("normalize JSON record: %w", err)
+	}
+	return normalized, nil
+}
+
+// MatchPrepared evaluates an event returned by Prepare. It lets the engine
+// share one normalization pass across detection and exclusion predicates.
+func (p *Predicate) MatchPrepared(ctx context.Context, event map[string]any) (bool, error) {
+	if p == nil {
+		return true, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	value, _, err := p.program.ContextEval(ctx, map[string]any{"event": event})
 	if err != nil {
 		return false, fmt.Errorf("evaluate CEL expression: %w", err)
 	}
@@ -82,19 +108,16 @@ func (p *Predicate) Match(ctx context.Context, record model.Record) (bool, error
 	return matched, nil
 }
 
-func normalizeMap(ctx context.Context, input map[string]any) (map[string]any, error) {
-	keys := make([]string, 0, len(input))
-	for key := range input {
-		keys = append(keys, key)
+func normalizeMap(ctx context.Context, input map[string]any, depth int) (map[string]any, error) {
+	if depth > maxEventNesting {
+		return nil, fmt.Errorf("event nesting exceeds %d levels", maxEventNesting)
 	}
-	sort.Strings(keys)
-
 	result := make(map[string]any, len(input))
-	for _, key := range keys {
+	for key, rawValue := range input {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		value, err := normalizeValue(ctx, input[key])
+		value, err := normalizeValue(ctx, rawValue, depth+1)
 		if err != nil {
 			return nil, fmt.Errorf("field %q: %w", key, err)
 		}
@@ -103,7 +126,10 @@ func normalizeMap(ctx context.Context, input map[string]any) (map[string]any, er
 	return result, nil
 }
 
-func normalizeValue(ctx context.Context, value any) (any, error) {
+func normalizeValue(ctx context.Context, value any, depth int) (any, error) {
+	if depth > maxEventNesting {
+		return nil, fmt.Errorf("event nesting exceeds %d levels", maxEventNesting)
+	}
 	switch typed := value.(type) {
 	case nil, bool, string:
 		return typed, nil
@@ -134,16 +160,16 @@ func normalizeValue(ctx context.Context, value any) (any, error) {
 	case float64:
 		return normalizeFloat(typed)
 	case model.Record:
-		return normalizeMap(ctx, map[string]any(typed))
+		return normalizeMap(ctx, map[string]any(typed), depth)
 	case map[string]any:
-		return normalizeMap(ctx, typed)
+		return normalizeMap(ctx, typed, depth)
 	case []any:
 		result := make([]any, len(typed))
 		for i, item := range typed {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			normalized, err := normalizeValue(ctx, item)
+			normalized, err := normalizeValue(ctx, item, depth+1)
 			if err != nil {
 				return nil, fmt.Errorf("element %d: %w", i, err)
 			}
@@ -151,7 +177,17 @@ func normalizeValue(ctx context.Context, value any) (any, error) {
 		}
 		return result, nil
 	default:
-		return nil, fmt.Errorf("unsupported JSON value type %T", value)
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("unsupported JSON value type %T: %w", value, err)
+		}
+		decoder := json.NewDecoder(bytes.NewReader(encoded))
+		decoder.UseNumber()
+		var canonical any
+		if err := decoder.Decode(&canonical); err != nil {
+			return nil, fmt.Errorf("decode JSON representation of %T: %w", value, err)
+		}
+		return normalizeValue(ctx, canonical, depth)
 	}
 }
 
@@ -160,7 +196,7 @@ func normalizeNumber(number json.Number) (any, error) {
 	if strings.ContainsAny(text, ".eE") {
 		value, err := strconv.ParseFloat(text, 64)
 		if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
-			return nil, fmt.Errorf("number %q cannot be represented as a CEL double", text)
+			return text, nil
 		}
 		return value, nil
 	}
@@ -170,7 +206,7 @@ func normalizeNumber(number json.Number) (any, error) {
 	if value, err := strconv.ParseUint(text, 10, 64); err == nil {
 		return value, nil
 	}
-	return nil, fmt.Errorf("integer %q is outside the CEL int and uint ranges", text)
+	return text, nil
 }
 
 func normalizeFloat(value float64) (float64, error) {

@@ -14,7 +14,7 @@ sudo install -m 0644 deploy/examples/global.yaml \
 sudo install -m 0644 deploy/examples/rule.yaml \
   /opt/venator/config/rules/example.yaml
 sudo install -m 0644 deploy/examples/events.ndjson \
-  /opt/venator/config/rules/events.ndjson
+  /opt/venator/config/files/events.ndjson
 ```
 
 Register that path in each eligible Nomad client's agent configuration, then

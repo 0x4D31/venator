@@ -17,10 +17,11 @@ run
 /Users/alice/.config/venator/rules/example.yaml
 ```
 
-The runnable sample in `deploy/examples/` uses `file.ndjson` and resolves
-`events.ndjson` relative to the rule file. Install those three files
-together, or have the agent provide NDJSON on stdin to a `stdin.default` rule
-as one explicit pipeline whose producer status is also checked.
+The runnable sample in `deploy/examples/` uses `ndjson.local-events`; its global
+profile resolves `events.ndjson` relative to the global YAML. Install those
+two files together (the rule can live elsewhere), or have the agent provide
+NDJSON on stdin to a `stdin.default` rule as one explicit pipeline whose
+producer status is also checked.
 
 An appropriate recurring instruction is:
 

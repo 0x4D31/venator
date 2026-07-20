@@ -4,7 +4,7 @@ status: experimental
 confidence: medium
 enabled: true
 schedule: "*/15 * * * *"
-queryEngine: clickhouse.local-logs
+source: clickhouse.local-logs
 publishers:
   - clickhouse.findings
   - stdout.default

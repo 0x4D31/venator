@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -38,6 +40,55 @@ type blockingConnector struct {
 	closes       atomic.Int32
 }
 
+func TestNDJSONProfileIsLazyAndReadsSelectedSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	events := filepath.Join(dir, "events.ndjson")
+	if err := os.WriteFile(events, []byte("{\"kind\":\"failed_login\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	globalPath := filepath.Join(dir, "global.yaml")
+	globalYAML := `runtime:
+  maxRecords: 10
+  maxBytes: 1048576
+  timeout: 1m
+ndjson:
+  instances:
+    events:
+      path: events.ndjson
+    unused:
+      path: ${VENATOR_TEST_UNUSED_NDJSON}
+`
+	if err := os.WriteFile(globalPath, []byte(globalYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	global, err := config.ParseGlobalConfig(globalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(context.Background(), global, strings.NewReader(""), io.Discard)
+	t.Cleanup(func() { _ = registry.Close() })
+	rule := &config.RuleConfig{Source: "ndjson.events", Publishers: []string{"stdout.default"}}
+	if err := registry.ValidateRule(rule); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := registry.GetQueryRunner(rule.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := runner.Query(context.Background(), rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0]["kind"] != "failed_login" {
+		t.Fatalf("records = %#v", records)
+	}
+
+	unused := &config.RuleConfig{Source: "ndjson.unused", Publishers: []string{"stdout.default"}}
+	if err := registry.ValidateRule(unused); err == nil || !strings.Contains(err.Error(), "VENATOR_TEST_UNUSED_NDJSON") {
+		t.Fatalf("selected unset profile error = %v", err)
+	}
+}
+
 func (*blockingConnector) Query(context.Context, *config.RuleConfig) ([]model.Record, error) {
 	return nil, nil
 }
@@ -64,8 +115,8 @@ func TestOpenSearchPreflightPreservesLiteralDollarPasswordAcrossRoles(t *testing
 	registry := NewRegistry(context.Background(), global, strings.NewReader(""), io.Discard)
 	defer registry.Close()
 	rule := &config.RuleConfig{
-		QueryEngine: "opensearch.logs",
-		Publishers:  []string{"opensearch.logs"},
+		Source:     "opensearch.logs",
+		Publishers: []string{"opensearch.logs"},
 	}
 	if err := registry.PreflightRule(rule); err != nil {
 		t.Fatal(err)
@@ -139,7 +190,7 @@ func TestWebhookConnectorResolvesEnvironmentWithoutMutatingGlobalConfig(t *testi
 	}
 	registry := NewRegistry(context.Background(), global, strings.NewReader(""), io.Discard)
 	t.Cleanup(func() { _ = registry.Close() })
-	rule := &config.RuleConfig{QueryEngine: "stdin.default", Publishers: []string{"webhook.agent"}}
+	rule := &config.RuleConfig{Source: "stdin.default", Publishers: []string{"webhook.agent"}}
 	if err := registry.PreflightRule(rule); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +221,7 @@ func TestPreflightDefersBestEffortConnectorFailuresToRun(t *testing.T) {
 	registry := NewRegistry(context.Background(), testGlobalConfig(), strings.NewReader(""), io.Discard)
 	t.Cleanup(func() { _ = registry.Close() })
 	rule := &config.RuleConfig{
-		QueryEngine:          "stdin.default",
+		Source:               "stdin.default",
 		Publishers:           []string{"stdout.default"},
 		BestEffortPublishers: []string{"missing.optional"},
 	}
@@ -195,7 +246,7 @@ func TestBigQuerySinkPreflightRejectsEnvironmentExpandedEmptyRole(t *testing.T) 
 	}
 	registry := NewRegistry(context.Background(), global, strings.NewReader(""), io.Discard)
 	defer registry.Close()
-	rule := &config.RuleConfig{QueryEngine: "stdin.default", Publishers: []string{"bigquery.alerts"}}
+	rule := &config.RuleConfig{Source: "stdin.default", Publishers: []string{"bigquery.alerts"}}
 	if err := registry.PreflightRule(rule); err == nil || !strings.Contains(err.Error(), "non-empty datasetID and tableID") {
 		t.Fatalf("PreflightRule() error = %v", err)
 	}
@@ -213,7 +264,7 @@ func TestClickHouseSinkPreflightRejectsAddressWithoutPort(t *testing.T) {
 	}
 	registry := NewRegistry(context.Background(), global, strings.NewReader(""), io.Discard)
 	defer registry.Close()
-	rule := &config.RuleConfig{QueryEngine: "stdin.default", Publishers: []string{"clickhouse.alerts"}}
+	rule := &config.RuleConfig{Source: "stdin.default", Publishers: []string{"clickhouse.alerts"}}
 	if err := registry.PreflightRule(rule); err == nil || !strings.Contains(err.Error(), "host:port") {
 		t.Fatalf("PreflightRule() error = %v", err)
 	}
@@ -253,7 +304,7 @@ func TestClickHousePreflightValidatesExpandedStringReferences(t *testing.T) {
 			}
 			registry := NewRegistry(context.Background(), global, strings.NewReader(""), io.Discard)
 			t.Cleanup(func() { _ = registry.Close() })
-			rule := &config.RuleConfig{QueryEngine: "stdin.default", Publishers: []string{"clickhouse.dynamic"}}
+			rule := &config.RuleConfig{Source: "stdin.default", Publishers: []string{"clickhouse.dynamic"}}
 			err := registry.PreflightRule(rule)
 			if test.wantError == "" && err != nil {
 				t.Fatal(err)
@@ -424,7 +475,7 @@ func TestRegistryCloseWaitsForFailedInitializationCleanup(t *testing.T) {
 		start func(*Registry, *blockingConnector, chan struct{}, chan struct{}) <-chan error
 	}{
 		{
-			name: "query runner",
+			name: "source",
 			start: func(registry *Registry, connector *blockingConnector, started, release chan struct{}) <-chan error {
 				registry.queryFactories["test.late"] = func(context.Context) (QueryRunner, error) {
 					close(started)

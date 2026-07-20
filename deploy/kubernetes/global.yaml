@@ -2,3 +2,8 @@ runtime:
   maxRecords: 1000
   maxBytes: 16777216
   timeout: 5m
+
+ndjson:
+  instances:
+    smoke-events:
+      path: /etc/venator/rule/events.ndjson

@@ -39,11 +39,12 @@ kubectl logs -n venator -l job-name="$(kubectl get jobs -n venator \
 
 Make one named CronJob and rule ConfigMap per rule. If a rule uses an exclusion
 file, create another ConfigMap, mount only that ConfigMap, and make
-`exclusionsPath` match the mounted file. The sample intentionally has no
+`exclusionsFile` match the mounted file. The sample intentionally has no
 unconditional exclusion volume, so a rule without exclusions can start.
 For a database-backed rule, set `RULE_DATA_FILE=` when invoking the helper; for
 another finite file, set both `RULE_DATA_FILE` and its optional
-`RULE_DATA_KEY` to match `rule.query`.
+`RULE_DATA_KEY` to match the path configured under the selected global
+`ndjson.instances` profile.
 
 The helper defaults to the sample names referenced by `cronjob.yaml`. For a
 fleet, set a unique `RULE_CONFIGMAP_NAME` and, when applicable, a unique

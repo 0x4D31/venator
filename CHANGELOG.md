@@ -13,9 +13,9 @@ first-class workflow.
 - Typed records throughout the source boundary.
 - Official ClickHouse source/sink support with bounded queries, TLS/mTLS,
   native or HTTP protocols, and batch finding inserts.
-- Built-in NDJSON stdin, finite-file source, and stdout sink for local agents,
-  workstation snapshots, and bounded producer pipelines, with a bounded
-  per-event CEL detection expression for local inputs.
+- Built-in NDJSON stdin and stdout plus named finite-file source profiles for
+  local agents, workstation snapshots, and bounded producer pipelines, with a
+  bounded per-event CEL query for local inputs.
 - Optional exact-field identity projections for producers whose records contain
   stable event keys alongside volatile scan or run metadata.
 - Generic webhook delivery of canonical findings, with optional Standard
@@ -54,10 +54,8 @@ first-class workflow.
   independent server and client result limits and require least-privilege
   credentials as their authorization boundary.
 - Global, rule, and exclusion YAML reject implicit scalar coercion, aliases in
-  mapping keys, and merge keys; `and`/`or` ambiguity is rejected, and regular
-  expressions are compiled once.
-- Null source values no longer compare equal to empty strings in exclusions or
-  satisfy negative text operators.
+  mapping keys, and merge keys. Local and exclusion CEL predicates compile
+  during validation and preserve typed source values.
 - Environment references are decoded safely and resolved only for selected
   connectors; literal dollar signs in credentials are preserved, and the
   Docker builder never copies runtime configuration or secrets.
@@ -84,6 +82,11 @@ first-class workflow.
   query rows independently.
 - Both CLI configuration paths are explicit; the old repository-relative
   global-config default is removed.
+- Rules use `source` consistently for connector selection, `language` for the
+  executable query language, and `query` for SQL, PPL, or CEL detection logic.
+  Finite NDJSON paths live in named global source profiles.
+- Exclusion files use named CEL predicates and are referenced through
+  `exclusionsFile`, replacing the legacy text-operator format.
 - Signal payloads omit unmapped normalized fields instead of serializing empty
   nested objects.
 - Required and best-effort sinks fan out concurrently so one slow destination

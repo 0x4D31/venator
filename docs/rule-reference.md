@@ -10,21 +10,20 @@ independent. The Helm chart performs that expansion for packaged rule trees.
 
 | Key | Constraint and meaning |
 | --- | --- |
-| `name` | Required, non-empty rule name. Helm additionally requires a unique DNS-1123 label of at most 52 characters. |
+| `name` | Required, non-empty rule name. Helm additionally requires a unique DNS-1123 label of at most 52 characters; `global` is reserved. |
 | `uid` | Required, non-empty stable identity namespace. It need not be a UUID, but changing it changes finding IDs. It must be unique among unrelated concurrently active rules. |
 | `status` | Optional lifecycle metadata copied to findings. |
 | `confidence` | Required: `unknown`, `low`, `medium`, or `high`. |
 | `enabled` | Optional boolean; defaults to `false`. A disabled direct run is skipped unless `--force` is used. |
 | `schedule` | Optional opaque deployment metadata. The binary neither parses nor executes it. Helm requires a non-empty Kubernetes CronJob schedule for every enabled packaged rule; Kubernetes validates that syntax. |
-| `queryEngine` | Required source name. Built-ins are `stdin.default` and `file.ndjson`; configured sources use `<connector>.<instance>`. |
-| `language` | Required. `stdin.default` and `file.ndjson` require `NDJSON`; BigQuery and ClickHouse require `SQL`; OpenSearch accepts `SQL` or `PPL`. |
-| `query` | Source-specific input. It is required except for `stdin.default`, where it must be omitted or empty. For `file.ndjson`, it is a completed NDJSON-file path; a relative path is resolved from the rule file's directory. |
-| `expr` | Optional non-empty CEL boolean evaluated for each `stdin.default` or `file.ndjson` event. Omit it when the input already contains only candidates. It is invalid for other sources. |
+| `source` | Required source name. `stdin.default` is built in; configured sources use `<connector>.<instance>`, including `ndjson.<instance>`. |
+| `language` | Required and operational. `stdin.default` and NDJSON instances require `CEL`; BigQuery and ClickHouse require `SQL`; OpenSearch accepts `SQL` or `PPL`. |
+| `query` | Required non-empty query in the declared language. For a local NDJSON source it is a CEL boolean evaluated per event. Use the quoted string `"true"` to accept every input record. |
 | `identity` | Optional finding-identity projection, described below. Omit it to hash the complete source record. |
 | `publishers` | Required-delivery sink names. Every sink is attempted; any failure makes the run fail. |
 | `bestEffortPublishers` | Best-effort sink names. Failures are reported but do not fail an otherwise successful run. At least one sink across the two publisher lists is required, and names cannot repeat. |
 | `output` | Required output contract, described below. |
-| `exclusionsPath` | Optional exclusion file. Relative paths resolve from the rule file's directory. |
+| `exclusionsFile` | Optional exclusion file. Relative paths resolve from the rule file's directory. |
 | `llm` | Optional advisory-review policy, described below. |
 | `author`, `description`, `references`, `tags`, `ttps` | Optional metadata. Each TTP may contain `framework`, `tactic`, `name`, `id`, and `reference`. |
 
@@ -35,42 +34,81 @@ without issuing the detection query. Connector instance keys may contain only
 ASCII letters, digits, hyphens, and underscores; dots are reserved as the
 separator in `<connector>.<instance>`.
 
-### Local NDJSON expression
+Global instances hold reusable source or sink configuration—locations,
+credentials, transport, and safety limits—while a rule holds detection logic
+and output mapping. The namespaced reference is uniform: for example,
+`opensearch.production`, `clickhouse.home-lab`, or `ndjson.authentication`.
 
-The two local NDJSON sources can select records with a
-[Common Expression Language](https://cel.dev/) predicate. The only variable is
-`event`, a map containing the current JSON object:
+### Local NDJSON query
+
+`stdin.default` and configured NDJSON sources select records with a
+[Common Expression Language](https://cel.dev/) query. A finite file is a named
+instance in the global configuration; its `path` may be absolute or relative
+to the global configuration file:
 
 ```yaml
-queryEngine: file.ndjson
-language: NDJSON
-query: ./events.ndjson
-expr: |
+ndjson:
+  instances:
+    authentication-events:
+      path: ./events.ndjson
+```
+
+The rule refers to that source profile. The only CEL variable is `event`, a map
+containing the current JSON object:
+
+```yaml
+source: ndjson.authentication-events
+language: CEL
+query: |
   event.kind == "failed_login" &&
   has(event.severity) &&
   event.severity >= 4
 ```
 
+The file must be a completed regular file. Each invocation reads it from byte
+zero; Venator does not glob, tail, checkpoint, or remember offsets. `~` is not
+expanded; use `${HOME}` explicitly when needed. The profile location belongs in
+global configuration because it is source configuration, while the rule's
+`query` remains detection logic. Profile string values support the same lazy
+`${NAME}` expansion as other connector instances.
+
+For bounded producer output, use the built-in stdin source without a profile:
+
+```yaml
+source: stdin.default
+language: CEL
+query: "true"
+```
+
+The CLI has no file-path override. Use a named profile when a file is part of
+the deployment, and use `stdin.default` when a producer or agent chooses the
+finite batch at invocation time. That keeps `validate` and `run` on the same
+declarative source contract.
+
 Identifier-like JSON keys support `event.key`; use bracket access for keys
 containing dots, spaces, reserved words, or other punctuation, for example
 `event["process.name"] == "loginwindow"`. CEL collection macros are
 available, so a list can be tested with an expression such as
-`event.tags.exists(tag, tag == "admin")`. JSON integers become CEL `int` or
-`uint`, decimal and exponent values become `double`, and comparisons across
-numeric types are enabled.
+`event.tags.exists(tag, tag == "admin")`. JSON integers within CEL's ranges
+become exact `int` or `uint` values. Decimal and exponent values become
+IEEE-754 `double` values and may round; encode precision-sensitive values as
+strings upstream. Numeric literals outside those CEL ranges remain their
+original strings. Cross-type numeric comparisons are enabled.
 
-The expression is compiled during configuration validation and must have a
-boolean result. Evaluation errors—including an unguarded missing field, an
-incompatible type, or an out-of-range number—fail the run before any finding is
-published. Use `has(event.field)` when a key is optional. Venator limits the
-expression to 4,096 code points, parser depth to 100, and runtime cost to
-100,000 units per event. Expressions are stateless and cannot transform
-records, aggregate a batch, correlate events, or maintain a time window.
+CEL maps are unordered. Predicates must not depend on map iteration order.
 
-Expression evaluation runs after source size checks and before exclusions. Run
-reports use `queried` for source records, `matched` for events whose expression
-returned true (or all events when `expr` is omitted), `excluded` for matched
-events suppressed by exclusions, and `findings` for the final count.
+The query is compiled during configuration validation and must have a boolean
+result. Evaluation errors—including an unguarded missing field or an
+incompatible comparison—fail the run before any finding is published.
+Use `has(event.field)` when a key is optional. Venator limits the query to 4,096
+code points, parser depth to 100, and runtime cost to 100,000 units per event.
+Queries are stateless and cannot transform records, aggregate a batch,
+correlate events, or maintain a time window.
+
+CEL query evaluation runs after source size checks and before exclusions. Run
+reports use `queried` for decoded source records, `matched` for events whose
+query returned true, `excluded` for matched events suppressed by exclusions,
+and `findings` for the final count.
 
 ### Finding identity
 
@@ -88,7 +126,7 @@ exact top-level source key; dots have no path-traversal meaning. Every selected
 key must exist on every retained record at runtime. Include a host, tenant, or
 other namespace when the event key is not globally unique.
 
-Identity is evaluated after expression evaluation and exclusions. Different
+Identity is evaluated after local query evaluation and exclusions. Different
 retained records in the same run may not share one configured identity. A
 collision fails before publication instead of making identity depend on source
 order. Operators must still choose keys that are unique across every source
@@ -163,9 +201,11 @@ The model must return one annotation for every finding submitted for review.
 from the run. If a required review fails or `maxFindings` truncates the batch,
 deterministic findings are still delivered before the run exits non-zero.
 
-Reviewer credentials and model selection live in the global configuration. For
-example, the bundled [local review rule](../config/examples/llm-review-rule.yaml)
-can be paired with:
+Reviewer credentials and model selection live in the global configuration. The
+bundled [local review rule](../config/examples/llm-review-rule.yaml) uses the
+source profile in
+[`llm-review-global.yaml`](../config/examples/llm-review-global.yaml), which
+contains this reviewer block:
 
 ```yaml
 llm:
@@ -180,40 +220,40 @@ model or provider; an explicitly configured value, including zero, is sent.
 
 ## Exclusion document
 
-An exclusion file is a YAML list. Each entry contains exactly one non-empty
-`and` or `or` condition list; groups are not nested. A record is excluded when
-any entry matches.
+Reference the file from a rule with `exclusionsFile: ./exclusions.yaml`.
+An exclusion file is a YAML list of up to 256 named CEL predicates. Every entry
+has exactly two non-empty string fields: `name` and `when`. Names must be unique
+in the file and at most 128 Unicode code points. A record is excluded when any
+`when` query returns true.
 
 ```yaml
-- conditions:
-    and:
-      - field: username
-        operator: equals
-        value: test
-      - field: source_ip
-        operator: in
-        values: [192.0.2.10, 192.0.2.11]
+- name: test-user-from-known-address
+  when: |
+    has(event.username) &&
+    event.username == "test" &&
+    has(event.source_ip) &&
+    event.source_ip in ["192.0.2.10", "192.0.2.11"]
+
+- name: internal-service-account
+  when: |
+    has(event.actor) &&
+    event.actor == "health-check@example.test"
 ```
 
-| Operator | Accepted operand | Match |
-| --- | --- | --- |
-| `equals` | `value` (explicit empty string allowed) | Field equals `value`. |
-| `not_equals` | `value` (explicit empty string allowed) | Field differs from `value`. |
-| `contains` | Non-empty `value` | Field contains `value`. |
-| `regex` | Non-empty `value` containing a valid Go regular expression | Expression matches the field. |
-| `in` | Non-empty `values` list | Field equals an entry. |
-| `not_in` | Non-empty `values` list | Field differs from every entry. |
-
-Every condition requires a non-empty `field`, which names an exact top-level
-source-record key; dots have no path-traversal meaning. Scalar operators reject
-`values`, and set operators reject `value`; this prevents ambiguous or
-accidentally broad exclusions. A missing or null field, or a value that cannot
-be represented as text, does not match, including for negative operators.
+`when` uses the same `event` value, type behavior, limits, and missing-field
+rules as a local CEL query, regardless of the source's query language. This
+keeps exclusions typed and makes nested objects, lists, boolean values, and
+numeric comparisons available without a second operator language. Guard
+optional fields with `has`. Connector-native values such as timestamps, bytes,
+and precise decimals use their JSON representation inside CEL; raw findings
+still retain the source record. Exclusion files are compiled during validation;
+evaluation errors fail the run before any finding is published.
 
 Local and non-Helm deployments may use absolute paths or paths relative to the
 rule file; the target must be a regular file, not a pipe or device. In the
 chart, put exclusion files directly under `config/exclusions/` and use exactly
-`/app/exclusion/<name>.yaml`; Helm rejects relative, nested, or unpackaged
+`/app/exclusion/<name>.yaml`. The basename must be a lowercase DNS-1123 name
+of at most 52 characters. Helm rejects relative, nested, or unpackaged
 exclusion references.
 
 ## Environment references

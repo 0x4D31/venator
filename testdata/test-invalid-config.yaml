@@ -4,7 +4,7 @@ status: test
 confidence: low
 enabled: true
 schedule: "0 */2 * * *"
-queryEngine: opensearch
+source: opensearch
 publishers:
   - opensearch
   - pubsub

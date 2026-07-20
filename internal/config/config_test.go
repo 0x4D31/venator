@@ -21,8 +21,6 @@ const (
 	nonExistentGlobalConfigPath = "non_existent_global_file.yaml"
 )
 
-func stringPointer(value string) *string { return &value }
-
 func TestParseRuleConfig(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -84,8 +82,8 @@ func makeRuleConfig() *config.RuleConfig {
 		Confidence:     config.ConfidenceLow,
 		Enabled:        true,
 		Schedule:       "0 */2 * * *",
-		QueryEngine:    "opensearch.dev",
-		ExclusionsPath: "test-exclusions.yaml",
+		Source:         "opensearch.dev",
+		ExclusionsFile: "test-exclusions.yaml",
 		Publishers:     []string{"opensearch.dev", "stdout.default"},
 		Language:       "SQL",
 		Query:          "SELECT * FROM logs",
@@ -290,10 +288,10 @@ func TestConfigParsersRejectMultipleYAMLDocuments(t *testing.T) {
 uid: one
 confidence: low
 enabled: false
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 ---
 name: two
@@ -327,10 +325,10 @@ name: merged
 uid: merged
 confidence: low
 enabled: false
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 `
 	if err := os.WriteFile(rule, []byte(ruleContents), 0o600); err != nil {
@@ -351,10 +349,10 @@ func TestParseRuleConfigRejectsAliasMappingKeys(t *testing.T) {
 name: alias-key
 confidence: low
 enabled: false
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 output: {format: raw, fields: []}
 `},
 		{name: "nested identity", contents: `description: &control_key fields
@@ -362,10 +360,10 @@ name: alias-key
 uid: alias-key
 confidence: low
 enabled: false
-queryEngine: stdin.default
+source: stdin.default
 publishers: [stdout.default]
-language: NDJSON
-query: ""
+language: CEL
+query: "true"
 identity:
   *control_key: [123]
 output: {format: raw, fields: []}
@@ -398,9 +396,9 @@ func TestParseRuleConfigRejectsInvalidControlFieldTypes(t *testing.T) {
 		{name: "null enabled", old: "enabled: true", replacement: "enabled: null", want: "enabled must be a YAML boolean"},
 		{name: "numeric name", old: "name: test-rule", replacement: "name: 123", want: "name must be a YAML string"},
 		{name: "numeric uid", old: "uid: 2001416b-bdd3-4a31-af52-3b1933c4f926", replacement: "uid: 123", want: "uid must be a YAML string"},
-		{name: "boolean exclusions path", old: "exclusionsPath: test-exclusions.yaml", replacement: "exclusionsPath: true", want: "exclusionsPath must be a YAML string"},
-		{name: "null expression", old: "language: SQL", replacement: "expr: null\nlanguage: SQL", want: "expr must not be null"},
-		{name: "boolean expression", old: "language: SQL", replacement: "expr: true\nlanguage: SQL", want: "expr must be a YAML string"},
+		{name: "boolean exclusions path", old: "exclusionsFile: test-exclusions.yaml", replacement: "exclusionsFile: true", want: "exclusionsFile must be a YAML string"},
+		{name: "boolean query", old: "query: SELECT * FROM logs", replacement: "query: true", want: "query must be a YAML string"},
+		{name: "null source", old: "source: opensearch.dev", replacement: "source: null", want: "source must be a YAML string"},
 		{name: "null schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: null", want: "schedule must be a YAML string"},
 		{name: "numeric schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: 5", want: "schedule must be a YAML string"},
 		{name: "boolean schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: true", want: "schedule must be a YAML string"},
@@ -417,6 +415,34 @@ func TestParseRuleConfigRejectsInvalidControlFieldTypes(t *testing.T) {
 			}
 			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseRuleConfigRejectsLegacyDetectionKeys(t *testing.T) {
+	base, err := os.ReadFile(existentConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name        string
+		old         string
+		replacement string
+		legacyKey   string
+	}{
+		{name: "query engine", old: "source: opensearch.dev", replacement: "queryEngine: opensearch.dev", legacyKey: "queryEngine"},
+		{name: "expression", old: "language: SQL", replacement: "expr: true\nlanguage: SQL", legacyKey: "expr"},
+		{name: "exclusions path", old: "exclusionsFile: test-exclusions.yaml", replacement: "exclusionsPath: test-exclusions.yaml", legacyKey: "exclusionsPath"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			contents := strings.Replace(string(base), test.old, test.replacement, 1)
+			path := filepath.Join(t.TempDir(), "rule.yaml")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), test.legacyKey) {
+				t.Fatalf("ParseRuleConfig() error = %v, want legacy key %q", err, test.legacyKey)
 			}
 		})
 	}
@@ -441,9 +467,9 @@ func TestParseRuleConfigRejectsCoercedReviewPolicy(t *testing.T) {
 uid: strict-review
 confidence: high
 enabled: true
-queryEngine: stdin.default
-language: NDJSON
-query: ""
+source: stdin.default
+language: CEL
+query: "true"
 publishers: [stdout.default]
 output: {format: raw, fields: []}
 llm:
@@ -589,53 +615,111 @@ func TestResolveEnvRejectsBlankCloudIdentifiers(t *testing.T) {
 	}
 }
 
-func TestFileSourcePathResolvesRelativeToRule(t *testing.T) {
+func TestNDJSONPathResolvesRelativeToGlobalConfig(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "rule.yaml")
-	contents := `name: local-file
-uid: local-file
-confidence: low
-enabled: true
-queryEngine: file.ndjson
-publishers: [stdout.default]
-language: NDJSON
-query: events.ndjson
-output: {format: raw, fields: []}
+	path := filepath.Join(dir, "global.yaml")
+	contents := `ndjson:
+  instances:
+    events:
+      path: events.ndjson
 `
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rule, err := config.ParseRuleConfig(path)
+	global, err := config.ParseGlobalConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rule.Query != filepath.Join(dir, "events.ndjson") {
-		t.Fatalf("query = %q", rule.Query)
+	resolved, err := global.NDJSON.Instances["events"].ResolvePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != filepath.Join(dir, "events.ndjson") {
+		t.Fatalf("path = %q", resolved)
+	}
+}
+
+func TestNDJSONPathInterpolatesLazilyBeforeResolution(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "global.yaml")
+	contents := `ndjson:
+  instances:
+    events:
+      path: ${VENATOR_TEST_NDJSON_PATH}
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Unsetenv("VENATOR_TEST_NDJSON_PATH")
+	global, err := config.ParseGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("unused unset profile blocked global parsing: %v", err)
+	}
+	profile := global.NDJSON.Instances["events"]
+	if _, err := profile.ResolvePath(); err == nil || !strings.Contains(err.Error(), "VENATOR_TEST_NDJSON_PATH") {
+		t.Fatalf("ResolvePath() error = %v", err)
+	}
+
+	t.Setenv("VENATOR_TEST_NDJSON_PATH", filepath.Join("snapshots", "events.ndjson"))
+	resolved, err := profile.ResolvePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "snapshots", "events.ndjson"); resolved != want {
+		t.Fatalf("relative path = %q, want %q", resolved, want)
+	}
+
+	absolute := filepath.Join(t.TempDir(), "events.ndjson")
+	t.Setenv("VENATOR_TEST_NDJSON_PATH", absolute)
+	resolved, err = profile.ResolvePath()
+	if err != nil || resolved != absolute {
+		t.Fatalf("absolute path = %q, %v", resolved, err)
+	}
+}
+
+func TestGlobalConfigRejectsAmbiguousNDJSONPaths(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "blank", path: " ", want: "requires path"},
+		{name: "padded", path: " events.ndjson ", want: "leading or trailing whitespace"},
+		{name: "glob", path: "events-*.ndjson", want: "not a glob"},
+		{name: "home shorthand", path: "~/events.ndjson", want: "use ${HOME}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := makeGlobalConfig()
+			cfg.NDJSON.Instances = map[string]config.NDJSONConfig{"events": {Path: test.path}}
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, test.want)
+			}
+		})
 	}
 }
 
 func TestRuleConfigValidatesBuiltInSourceLanguages(t *testing.T) {
 	tests := []struct {
-		name        string
-		queryEngine string
-		language    string
-		query       string
-		wantError   string
+		name      string
+		source    string
+		language  string
+		query     string
+		wantError string
 	}{
-		{name: "BigQuery SQL", queryEngine: "bigquery.prod", language: "sql", query: "SELECT 1"},
-		{name: "ClickHouse SQL", queryEngine: "clickhouse.home", language: "SQL", query: "SELECT 1"},
-		{name: "OpenSearch PPL", queryEngine: "opensearch.logs", language: "ppl", query: "source=logs"},
-		{name: "OpenSearch rejects EQL", queryEngine: "opensearch.logs", language: "EQL", query: "process where true", wantError: "SQL or PPL"},
-		{name: "file NDJSON", queryEngine: "file.ndjson", language: "NDJSON", query: "events.ndjson"},
-		{name: "file rejects SQL", queryEngine: "file.ndjson", language: "SQL", query: "events.ndjson", wantError: "requires language NDJSON"},
-		{name: "stdin NDJSON", queryEngine: "stdin.default", language: "ndjson"},
-		{name: "stdin rejects ignored query", queryEngine: "stdin.default", language: "NDJSON", query: "ignored", wantError: "query must be empty"},
-		{name: "custom source language remains extensible", queryEngine: "custom.source", language: "CEL", query: "event.kind == 'alert'"},
+		{name: "BigQuery SQL", source: "bigquery.prod", language: "sql", query: "SELECT 1"},
+		{name: "ClickHouse SQL", source: "clickhouse.home", language: "SQL", query: "SELECT 1"},
+		{name: "OpenSearch PPL", source: "opensearch.logs", language: "ppl", query: "source=logs"},
+		{name: "OpenSearch rejects EQL", source: "opensearch.logs", language: "EQL", query: "process where true", wantError: "SQL or PPL"},
+		{name: "NDJSON CEL", source: "ndjson.events", language: "cel", query: `has(event.kind)`},
+		{name: "NDJSON rejects format as language", source: "ndjson.events", language: "NDJSON", query: `true`, wantError: "requires language CEL"},
+		{name: "stdin CEL", source: "stdin.default", language: "CEL", query: `true`},
+		{name: "stdin requires query", source: "stdin.default", language: "CEL", wantError: "query is required"},
+		{name: "custom source language remains extensible", source: "custom.source", language: "CEL", query: "event.kind == 'alert'"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rule := *makeRuleConfig()
-			rule.QueryEngine = tt.queryEngine
+			rule.Source = tt.source
 			rule.Language = tt.language
 			rule.Query = tt.query
 			err := rule.Validate()
@@ -649,30 +733,53 @@ func TestRuleConfigValidatesBuiltInSourceLanguages(t *testing.T) {
 	}
 }
 
-func TestRuleConfigValidatesLocalNDJSONExpression(t *testing.T) {
+func TestRuleConfigRejectsPaddedIdentifiers(t *testing.T) {
 	tests := []struct {
-		name        string
-		queryEngine string
-		language    string
-		query       string
-		expr        *string
-		wantError   string
+		name   string
+		mutate func(*config.RuleConfig)
+		want   string
 	}{
-		{name: "omitted", queryEngine: "stdin.default", language: "NDJSON"},
-		{name: "stdin", queryEngine: "stdin.default", language: "NDJSON", expr: stringPointer(`event.severity >= 4`)},
-		{name: "file", queryEngine: "file.ndjson", language: "NDJSON", query: "events.ndjson", expr: stringPointer(`has(event.kind)`)},
-		{name: "empty expression", queryEngine: "stdin.default", language: "NDJSON", expr: stringPointer(" \n\t"), wantError: "expr cannot be empty"},
-		{name: "invalid expression", queryEngine: "stdin.default", language: "NDJSON", expr: stringPointer(`event.kind ==`), wantError: "invalid expr"},
-		{name: "non-boolean expression", queryEngine: "stdin.default", language: "NDJSON", expr: stringPointer(`event.kind`), wantError: "must return bool"},
-		{name: "remote source", queryEngine: "clickhouse.logs", language: "SQL", query: "SELECT 1", expr: stringPointer(`true`), wantError: "supported only"},
+		{name: "name", mutate: func(rule *config.RuleConfig) { rule.Name = " test-rule" }, want: "name must not have"},
+		{name: "uid", mutate: func(rule *config.RuleConfig) { rule.UID = "test-rule " }, want: "uid must not have"},
+		{name: "source", mutate: func(rule *config.RuleConfig) { rule.Source = " stdin.default" }, want: "source must not have"},
+		{name: "publisher", mutate: func(rule *config.RuleConfig) { rule.Publishers = []string{"stdout.default "} }, want: "publisher"},
+		{name: "best-effort publisher", mutate: func(rule *config.RuleConfig) {
+			rule.Publishers = nil
+			rule.BestEffortPublishers = []string{" stdout.default"}
+		}, want: "publisher"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule := makeRuleConfig()
+			test.mutate(rule)
+			if err := rule.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRuleConfigValidatesCELQuery(t *testing.T) {
+	tests := []struct {
+		name      string
+		source    string
+		language  string
+		query     string
+		wantError string
+	}{
+		{name: "stdin", source: "stdin.default", language: "CEL", query: `event.severity >= 4`},
+		{name: "NDJSON", source: "ndjson.events", language: "CEL", query: `has(event.kind)`},
+		{name: "empty", source: "stdin.default", language: "CEL", query: " \n\t", wantError: "query is required"},
+		{name: "invalid", source: "stdin.default", language: "CEL", query: `event.kind ==`, wantError: "invalid CEL query"},
+		{name: "non-boolean", source: "stdin.default", language: "CEL", query: `event.kind`, wantError: "must return bool"},
+		{name: "custom CEL", source: "custom.source", language: "CEL", query: `true`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			rule := *makeRuleConfig()
-			rule.QueryEngine = test.queryEngine
+			rule.Source = test.source
 			rule.Language = test.language
 			rule.Query = test.query
-			rule.Expr = test.expr
 			err := rule.Validate()
 			if test.wantError == "" && err != nil {
 				t.Fatal(err)
@@ -718,9 +825,9 @@ func TestParseRuleConfigIdentity(t *testing.T) {
 uid: local-finding
 confidence: high
 enabled: true
-queryEngine: stdin.default
-language: NDJSON
-query: ""
+source: stdin.default
+language: CEL
+query: "true"
 publishers: [stdout.default]
 identity:
   fields: [record_id, event.id]
@@ -749,9 +856,9 @@ func TestParseRuleConfigRejectsNonStringIdentityFields(t *testing.T) {
 uid: local-finding
 confidence: high
 enabled: true
-queryEngine: stdin.default
-language: NDJSON
-query: ""
+source: stdin.default
+language: CEL
+query: "true"
 publishers: [stdout.default]
 identity:
   fields: [record_id, %s]
@@ -998,6 +1105,9 @@ func TestGlobalConfigRejectsInvalidConnectorInstanceNames(t *testing.T) {
 		{name: "Slack", configure: func(cfg *config.GlobalConfig) { cfg.Slack.Instances = map[string]config.SlackConfig{"bad.name": {}} }},
 		{name: "ClickHouse", configure: func(cfg *config.GlobalConfig) {
 			cfg.ClickHouse.Instances = map[string]config.ClickHouseConfig{"bad.name": {}}
+		}},
+		{name: "NDJSON", configure: func(cfg *config.GlobalConfig) {
+			cfg.NDJSON.Instances = map[string]config.NDJSONConfig{"bad.name": {Path: "events.ndjson"}}
 		}},
 	}
 	for _, tt := range tests {

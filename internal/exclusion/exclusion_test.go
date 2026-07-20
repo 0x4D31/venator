@@ -1,414 +1,358 @@
 package exclusion
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/0x4D31/venator/internal/model"
 )
 
-func TestExcluder(t *testing.T) {
-	yamlPath := filepath.Join("..", "..", "testdata", "test-exclusions.yaml")
-
-	excluder, err := NewExcluder(yamlPath)
-	if err != nil {
-		t.Fatalf("failed to create Excluder: %v", err)
-	}
+func TestExcluderMatchesNestedTypedAndDottedFields(t *testing.T) {
+	excluder := loadExcluder(t, `
+- name: known automation account
+  when: |
+    "actor" in event &&
+    event.actor != null &&
+    "name" in event.actor &&
+    event.actor.name == "backup" &&
+    event.attempts >= 3 &&
+    event.enabled &&
+    event.tags.exists(tag, tag == "automation")
+- name: expected process
+  when: |
+    "process.name" in event && event["process.name"] == "loginwindow"
+`)
 
 	tests := []struct {
-		result   model.Record
-		excluded bool
+		name  string
+		event map[string]any
+		want  bool
 	}{
 		{
-			result: model.Record{
-				"username":   "test",
-				"ip_address": "192.168.1.1",
+			name: "nested typed values",
+			event: map[string]any{
+				"actor":    map[string]any{"name": "backup"},
+				"attempts": int64(3),
+				"enabled":  true,
+				"tags":     []any{"service", "automation"},
 			},
-			excluded: true,
+			want: true,
 		},
 		{
-			result: model.Record{
-				"email":    "user@example.com",
-				"domain":   "external.com",
-				"username": "user1",
-			},
-			excluded: true,
+			name:  "literal dotted key",
+			event: map[string]any{"process.name": "loginwindow"},
+			want:  true,
 		},
 		{
-			result: model.Record{
-				"email":    "user@external.com",
-				"domain":   "internal.local",
-				"username": "user2",
+			name: "typed mismatch",
+			event: map[string]any{
+				"actor":    map[string]any{"name": "backup"},
+				"attempts": int64(2),
+				"enabled":  true,
+				"tags":     []any{"automation"},
 			},
-			excluded: true,
-		},
-		{
-			result: model.Record{
-				"response_time": "fast",
-				"status_code":   "200",
-			},
-			excluded: true,
-		},
-		{
-			result: model.Record{
-				"user_role": "admin",
-				"username":  "adminuser",
-			},
-			excluded: true,
-		},
-		{
-			result: model.Record{
-				"department": "sales",
-			},
-			excluded: true,
-		},
-		{
-			result: model.Record{
-				"status": "inactive",
-			},
-			excluded: true,
-		},
-		{
-			result: model.Record{
-				"region": "eu-west-1",
-			},
-			excluded: true,
-		},
-		{
-			result: model.Record{
-				"user_role": "user",
-				"username":  "regularuser",
-			},
-			excluded: false,
-		},
-		{
-			result: model.Record{
-				"username":      "test",
-				"ip_address":    "10.0.0.1",
-				"response_time": "slow",
-			},
-			excluded: false,
-		},
-		{
-			result: model.Record{
-				"url": "https://www.example.com/path",
-			},
-			excluded: true,
-		},
-		{
-			result: model.Record{
-				"url": "http://example.com/anotherpath",
-			},
-			excluded: true,
-		},
-		{
-			result: model.Record{
-				"url": "https://sub.example.com/path",
-			},
-			excluded: true,
-		},
-		{
-			result: model.Record{
-				"url": "https://www.test.com/path",
-			},
-			excluded: false,
-		},
-		{
-			result: model.Record{
-				"url": "ftp://example.com/resource",
-			},
-			excluded: false,
+			want: false,
 		},
 	}
 
-	for i, tt := range tests {
-		excluded := excluder.IsExcluded(tt.result)
-		if excluded != tt.excluded {
-			t.Errorf("Test case %d: expected excluded=%v, got %v", i+1, tt.excluded, excluded)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := excluder.IsExcluded(context.Background(), test.event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("IsExcluded() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 
-func TestNewExcluderRejectsUnknownFieldsAndMixedBooleanGroups(t *testing.T) {
+func TestExcluderSupportsMissingAndNullGuards(t *testing.T) {
+	excluder := loadExcluder(t, `
+- name: test actor
+  when: |
+    "actor" in event && event.actor != null && event.actor == "test"
+`)
+
+	for _, test := range []struct {
+		name  string
+		event map[string]any
+		want  bool
+	}{
+		{name: "missing", event: map[string]any{}, want: false},
+		{name: "null", event: map[string]any{"actor": nil}, want: false},
+		{name: "different", event: map[string]any{"actor": "alice"}, want: false},
+		{name: "match", event: map[string]any{"actor": "test"}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := excluder.IsExcluded(context.Background(), test.event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("IsExcluded() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestExcluderStopsAfterFirstMatch(t *testing.T) {
+	excluder := loadExcluder(t, `
+- name: match
+  when: "true"
+- name: would fail
+  when: event.missing == "value"
+`)
+
+	excluded, err := excluder.IsExcluded(context.Background(), map[string]any{})
+	if err != nil || !excluded {
+		t.Fatalf("IsExcluded() = %t, %v", excluded, err)
+	}
+}
+
+func TestExcluderWrapsEvaluationErrorWithName(t *testing.T) {
+	excluder := loadExcluder(t, `
+- name: actor is test
+  when: event.actor == "test"
+`)
+
+	_, err := excluder.IsExcluded(context.Background(), map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), `evaluate exclusion "actor is test"`) ||
+		!strings.Contains(err.Error(), "evaluate CEL expression") {
+		t.Fatalf("IsExcluded() error = %v", err)
+	}
+}
+
+func TestExcluderHonorsCanceledContext(t *testing.T) {
+	excluder := loadExcluder(t, `
+- name: canceled evaluation
+  when: "true"
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := excluder.IsExcluded(ctx, map[string]any{})
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), `evaluate exclusion "canceled evaluation"`) {
+		t.Fatalf("IsExcluded() error = %v", err)
+	}
+}
+
+func TestExcluderReportsRuntimeCostLimit(t *testing.T) {
+	excluder := loadExcluder(t, `
+- name: expensive expression
+  when: event.values.all(value, value == "x")
+`)
+	values := make([]any, 100_001)
+	for i := range values {
+		values[i] = "x"
+	}
+
+	_, err := excluder.IsExcluded(context.Background(), map[string]any{"values": values})
+	if err == nil || !strings.Contains(err.Error(), `evaluate exclusion "expensive expression"`) ||
+		!strings.Contains(err.Error(), "cost limit") {
+		t.Fatalf("IsExcluded() error = %v", err)
+	}
+}
+
+func TestNewExcluderRejectsInvalidExpressions(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		when string
+		want string
+	}{
+		{name: "blank", when: `" \t"`, want: "when cannot be blank"},
+		{name: "syntax", when: "event.actor ==", want: "compile CEL expression"},
+		{name: "non-boolean", when: "event.actor", want: "CEL expression must return bool"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			content := "- name: broken expression\n  when: " + test.when + "\n"
+			_, err := NewExcluder(writeExclusions(t, content))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("NewExcluder() error = %v, want containing %q", err, test.want)
+			}
+			if test.name != "blank" && !strings.Contains(err.Error(), `compile exclusion "broken expression"`) {
+				t.Fatalf("NewExcluder() error does not identify the exclusion: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewExcluderRejectsInvalidEntryShape(t *testing.T) {
 	tests := []struct {
 		name    string
 		content string
 		want    string
 	}{
-		{
-			name:    "unknown operator key",
-			content: "- conditions:\n    xor: []\n",
-			want:    "unknown key \"xor\"",
-		},
-		{
-			name: "unknown condition key",
-			content: "- conditions:\n    and:\n      - field: x\n        operator: equals\n" +
-				"        value: y\n        unexpected: true\n",
-			want: "unknown key \"unexpected\"",
-		},
-		{
-			name: "duplicate operator key",
-			content: "- conditions:\n    and:\n      - field: x\n        operator: equals\n        value: y\n" +
-				"    and:\n      - field: x\n        operator: equals\n        value: z\n",
-			want: "duplicate key \"and\"",
-		},
-		{
-			name: "duplicate condition key",
-			content: "- conditions:\n    and:\n      - field: x\n        field: y\n" +
-				"        operator: equals\n        value: z\n",
-			want: "duplicate key \"field\"",
-		},
-		{
-			name: "both populated",
-			content: "- conditions:\n    and:\n      - field: x\n        operator: equals\n        value: y\n" +
-				"    or:\n      - field: x\n        operator: equals\n        value: z\n",
-			want: "mutually exclusive",
-		},
-		{
-			name: "empty and plus populated or",
-			content: "- conditions:\n    and: []\n    or:\n" +
-				"      - field: x\n        operator: equals\n        value: z\n",
-			want: "mutually exclusive",
-		},
-		{
-			name: "null and plus populated or",
-			content: "- conditions:\n    and: null\n    or:\n" +
-				"      - field: x\n        operator: equals\n        value: z\n",
-			want: "must be a YAML sequence",
-		},
-		{
-			name: "populated and plus empty or",
-			content: "- conditions:\n    and:\n      - field: x\n        operator: equals\n        value: y\n" +
-				"    or: []\n",
-			want: "mutually exclusive",
-		},
+		{name: "empty document", content: "", want: "top-level value must be a list"},
+		{name: "null document", content: "null\n", want: "top-level value must be a list"},
+		{name: "mapping document", content: "{}\n", want: "top-level value must be a list"},
+		{name: "scalar entry", content: "- invalid\n", want: "exclusion 1 must be a mapping"},
+		{name: "null entry", content: "- null\n", want: "exclusion 1 must be a mapping"},
+		{name: "non-string key", content: "- 1: value\n", want: "mapping keys must be strings"},
+		{name: "unknown field", content: "- name: example\n  when: \"true\"\n  note: no\n", want: `unknown key "note"`},
+		{name: "duplicate name field", content: "- name: one\n  name: two\n  when: \"true\"\n", want: `duplicate key "name"`},
+		{name: "duplicate when field", content: "- name: one\n  when: \"true\"\n  when: \"false\"\n", want: `duplicate key "when"`},
+		{name: "boolean name", content: "- name: true\n  when: \"true\"\n", want: "name must be a YAML string"},
+		{name: "null name", content: "- name: null\n  when: \"true\"\n", want: "name must be a YAML string"},
+		{name: "boolean when", content: "- name: example\n  when: true\n", want: "when must be a YAML string"},
+		{name: "null when", content: "- name: example\n  when: null\n", want: "when must be a YAML string"},
+		{name: "missing name", content: "- when: \"true\"\n", want: "name cannot be blank"},
+		{name: "missing when", content: "- name: example\n", want: "when cannot be blank"},
+		{name: "blank name", content: "- name: \" \\t\"\n  when: \"true\"\n", want: "name cannot be blank"},
+		{name: "padded name", content: "- name: \" example \"\n  when: \"true\"\n", want: "leading or trailing whitespace"},
+		{name: "control in name", content: "- name: \"example\\nname\"\n  when: \"true\"\n", want: "control characters"},
 	}
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "exclusions.yaml")
-			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want containing %q", err, test.want)
+			_, err := NewExcluder(writeExclusions(t, test.content))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("NewExcluder() error = %v, want containing %q", err, test.want)
 			}
 		})
 	}
 }
 
-func TestNewExcluderRequiresExactlyOneNonEmptyBooleanGroup(t *testing.T) {
-	tests := []struct {
-		name       string
-		conditions string
-		want       string
-	}{
-		{name: "missing", conditions: "{}", want: "one of and/or is required"},
-		{name: "empty and", conditions: "{and: []}", want: "and must be non-empty"},
-		{name: "null and", conditions: "{and: null}", want: "must be a YAML sequence"},
-		{name: "empty or", conditions: "{or: []}", want: "or must be non-empty"},
-		{name: "null or", conditions: "{or: null}", want: "must be a YAML sequence"},
+func TestNewExcluderRequiresUniqueBoundedNames(t *testing.T) {
+	t.Run("duplicate", func(t *testing.T) {
+		_, err := NewExcluder(writeExclusions(t, `
+- name: expected service account
+  when: "true"
+- name: expected service account
+  when: "false"
+`))
+		if err == nil || !strings.Contains(err.Error(), `duplicate name "expected service account"`) {
+			t.Fatalf("NewExcluder() error = %v", err)
+		}
+	})
+
+	t.Run("Unicode code point limit", func(t *testing.T) {
+		accepted := strings.Repeat("🦊", 128)
+		if _, err := NewExcluder(writeExclusions(t, "- name: \""+accepted+"\"\n  when: \"true\"\n")); err != nil {
+			t.Fatalf("128-code-point name was rejected: %v", err)
+		}
+
+		rejected := strings.Repeat("🦊", 129)
+		_, err := NewExcluder(writeExclusions(t, "- name: \""+rejected+"\"\n  when: \"true\"\n"))
+		if err == nil || !strings.Contains(err.Error(), "128 Unicode code points") {
+			t.Fatalf("NewExcluder() error = %v", err)
+		}
+	})
+}
+
+func TestNewExcluderEnforcesEntryLimit(t *testing.T) {
+	var content strings.Builder
+	for i := 0; i < 256; i++ {
+		content.WriteString("- name: exclusion ")
+		content.WriteString(strconv.Itoa(i))
+		content.WriteString("\n  when: \"false\"\n")
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			content := "- conditions: " + test.conditions + "\n"
-			path := filepath.Join(t.TempDir(), "exclusions.yaml")
-			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want containing %q", err, test.want)
-			}
-		})
+	if _, err := NewExcluder(writeExclusions(t, content.String())); err != nil {
+		t.Fatalf("256 exclusions were rejected: %v", err)
+	}
+	content.WriteString("- name: too many\n  when: \"false\"\n")
+	_, err := NewExcluder(writeExclusions(t, content.String()))
+	if err == nil || !strings.Contains(err.Error(), "at most 256 exclusions") {
+		t.Fatalf("NewExcluder() error = %v", err)
 	}
 }
 
-func TestNewExcluderRejectsMultipleYAMLDocuments(t *testing.T) {
-	content := `
-- conditions:
-    and:
-      - field: user
-        operator: equals
-        value: alice
----
-- conditions:
-    or:
-      - field: user
-        operator: equals
-        value: bob
-`
-	path := filepath.Join(t.TempDir(), "exclusions.yaml")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestNewExcluderRejectsYAMLMergeKeys(t *testing.T) {
-	content := `
-- &base
-  conditions:
-    and:
-      - field: user
-        operator: equals
-        value: alice
-- <<: *base
-`
-	path := filepath.Join(t.TempDir(), "exclusions.yaml")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), "YAML merge keys are not supported") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestNewExcluderRejectsAliasMappingKeys(t *testing.T) {
-	content := `
-- conditions:
-    and:
-      - field: &control_key operator
-        *control_key: equals
-        value: alice
-`
-	path := filepath.Join(t.TempDir(), "exclusions.yaml")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), "aliases are not supported as mapping keys") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestNewExcluderRequiresTopLevelList(t *testing.T) {
-	tests := []struct {
+func TestNewExcluderRejectsYAMLControlFeatures(t *testing.T) {
+	for _, test := range []struct {
 		name    string
 		content string
+		want    string
 	}{
-		{name: "null", content: "null\n"},
-		{name: "empty document", content: "---\n"},
-		{name: "mapping", content: "{}\n"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "exclusions.yaml")
-			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), "top-level value must be a list") {
-				t.Fatalf("error = %v", err)
+		{
+			name: "merge key",
+			content: `
+- &base
+  name: base
+  when: "true"
+- <<: *base
+`,
+			want: "YAML merge keys are not supported",
+		},
+		{
+			name: "alias mapping key",
+			content: `
+- name: &field when
+  *field: "true"
+`,
+			want: "aliases are not supported as mapping keys",
+		},
+		{
+			name:    "multiple documents",
+			content: "[]\n---\n[]\n",
+			want:    "multiple YAML documents are not supported",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := NewExcluder(writeExclusions(t, test.content))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("NewExcluder() error = %v, want containing %q", err, test.want)
 			}
 		})
 	}
+}
 
-	path := filepath.Join(t.TempDir(), "exclusions.yaml")
-	if err := os.WriteFile(path, []byte("[]\n"), 0o600); err != nil {
+func TestNewExcluderAcceptsEmptyListAndValueAliases(t *testing.T) {
+	empty, err := NewExcluder(writeExclusions(t, "[]\n"))
+	if err != nil {
 		t.Fatal(err)
 	}
+	excluded, err := empty.IsExcluded(context.Background(), map[string]any{})
+	if err != nil || excluded {
+		t.Fatalf("empty IsExcluded() = %t, %v", excluded, err)
+	}
+
+	aliased := loadExcluder(t, `
+- name: &name expected actor
+  when: &condition event.actor == "test"
+- name: another exclusion
+  when: *condition
+`)
+	excluded, err = aliased.IsExcluded(context.Background(), map[string]any{"actor": "test"})
+	if err != nil || !excluded {
+		t.Fatalf("aliased IsExcluded() = %t, %v", excluded, err)
+	}
+}
+
+func TestFixtureExclusionsCompile(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "test-exclusions.yaml")
 	if _, err := NewExcluder(path); err != nil {
-		t.Fatalf("explicit empty list should be valid: %v", err)
+		t.Fatal(err)
 	}
 }
 
-func TestNewExcluderValidatesOperatorShape(t *testing.T) {
-	tests := []struct {
-		name       string
-		condition  string
-		wantError  string
-		wantRecord model.Record
-	}{
-		{
-			name:      "missing field",
-			condition: "operator: equals\n        value: alice",
-			wantError: "field is required",
-		},
-		{
-			name:      "missing scalar value",
-			condition: "field: user\n        operator: equals",
-			wantError: "requires 'value'",
-		},
-		{
-			name:      "empty contains value",
-			condition: "field: user\n        operator: contains\n        value: \"\"",
-			wantError: "requires a non-empty 'value'",
-		},
-		{
-			name:      "empty regex value",
-			condition: "field: user\n        operator: regex\n        value: \"\"",
-			wantError: "requires a non-empty 'value'",
-		},
-		{
-			name:      "scalar operator with values",
-			condition: "field: user\n        operator: equals\n        value: alice\n        values: []",
-			wantError: "does not accept 'values'",
-		},
-		{
-			name:      "set operator with value",
-			condition: "field: user\n        operator: in\n        value: alice\n        values: [alice]",
-			wantError: "does not accept 'value'",
-		},
-		{
-			name:      "set operator with omitted values",
-			condition: "field: user\n        operator: not_in",
-			wantError: "requires non-empty 'values'",
-		},
-		{
-			name:      "set operator with empty values",
-			condition: "field: user\n        operator: in\n        values: []",
-			wantError: "requires non-empty 'values'",
-		},
-		{
-			name:       "explicit empty equals value",
-			condition:  "field: user\n        operator: equals\n        value: \"\"",
-			wantRecord: model.Record{"user": ""},
-		},
-		{
-			name:       "explicit empty not-equals value",
-			condition:  "field: user\n        operator: not_equals\n        value: \"\"",
-			wantRecord: model.Record{"user": "alice"},
-		},
+func TestNewExcluderRejectsNonRegularAndMissingFiles(t *testing.T) {
+	if _, err := NewExcluder(t.TempDir()); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("directory error = %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			content := "- conditions:\n    and:\n      - " + tt.condition + "\n"
-			path := filepath.Join(t.TempDir(), "exclusions.yaml")
-			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			excluder, err := NewExcluder(path)
-			if tt.wantError != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
-					t.Fatalf("error = %v, want substring %q", err, tt.wantError)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !excluder.IsExcluded(tt.wantRecord) {
-				t.Fatalf("condition did not exclude %#v", tt.wantRecord)
-			}
-		})
+	missing := filepath.Join(t.TempDir(), "missing.yaml")
+	if _, err := NewExcluder(missing); err == nil || !strings.Contains(err.Error(), "stat exclusions file") {
+		t.Fatalf("missing-file error = %v", err)
 	}
 }
 
-func TestNullDoesNotMatchTextExclusions(t *testing.T) {
-	empty := ""
-	values := []string{""}
-	conditions := []Condition{
-		{Field: "value", Operator: "equals", Value: &empty},
-		{Field: "value", Operator: "not_equals", Value: &empty},
-		{Field: "value", Operator: "contains", Value: &empty},
-		{Field: "value", Operator: "in", Values: &values},
-		{Field: "value", Operator: "not_in", Values: &values},
+func loadExcluder(t *testing.T, content string) *Excluder {
+	t.Helper()
+	excluder, err := NewExcluder(writeExclusions(t, content))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, condition := range conditions {
-		if evaluateCondition(condition, model.Record{"value": nil}) {
-			t.Errorf("operator %q matched a null value", condition.Operator)
-		}
+	return excluder
+}
+
+func writeExclusions(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "exclusions.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	return path
 }

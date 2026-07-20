@@ -4,11 +4,10 @@ status: example
 confidence: low
 enabled: true
 schedule: "5 * * * *"
-queryEngine: file.ndjson
+source: ndjson.smoke-events
 publishers: [stdout.default]
-language: NDJSON
-query: ./events.ndjson
-expr: event.kind == "kubernetes_smoke"
+language: CEL
+query: event.kind == "kubernetes_smoke"
 output:
   format: raw
 description: Detect the smoke event in a mounted finite snapshot.

@@ -59,9 +59,15 @@ names. Extra mounts cannot overlap `/app/rule`, `/app/config`, or
 paths. A mount below `/tmp`, such as `/tmp/cache`, is allowed. Every extra mount
 must have a matching extra volume.
 
+Finite NDJSON source profiles belong in `files/global_config.yaml`. Mount each
+completed snapshot with a rule-scoped extra volume and use that absolute mount
+path in `ndjson.instances.<name>.path`; rule ConfigMaps intentionally contain
+only rule YAML.
+
 Put exclusion YAML directly under `exclusions/`. A rule that uses it must set
-`exclusionsPath` to exactly `/app/exclusion/<name>.yaml`; relative, nested, and
-unpackaged paths are rejected during rendering.
+`exclusionsFile` to exactly `/app/exclusion/<name>.yaml`; relative, nested, and
+unpackaged paths are rejected during rendering. The basename must be a
+lowercase DNS-1123 name of at most 52 characters.
 
 The bundled example rule is disabled. Add or enable a real source-backed rule
 before installation; the chart intentionally does not schedule an empty-stdin
