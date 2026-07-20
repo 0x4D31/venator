@@ -1,17 +1,11 @@
-# Tenzir integration
+# Optional Tenzir integration
 
-Tenzir is an optional collection and shaping layer, not a Venator dependency.
-It does not schedule Venator in these examples: an external scheduler invokes
-each bounded Venator run. There are two clean boundaries.
+This example demonstrates interoperability through Venator's generic NDJSON
+and ClickHouse boundaries. Venator does not invoke, embed, or require Tenzir,
+and an external scheduler still owns each bounded Venator run. Any producer
+that satisfies the same finite-input or durable-store contract can replace it.
 
-## When Tenzir alone is enough
-
-Tenzir already supports acquisition, parsing, filtering, Sigma evaluation,
-windowing, scheduling, and HTTP output. If those operators implement the whole
-detection and delivery path, adding Venator is unnecessary. Use Venator when
-you also need its canonical finding identity, independent rule-run contract,
-required and best-effort sink fan-out, receipts, or scheduler-facing exit
-status.
+The examples cover two optional handoff patterns.
 
 ## Direct NDJSON boundary
 

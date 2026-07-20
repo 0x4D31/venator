@@ -22,7 +22,8 @@ docker compose --profile run run --rm venator
 The sample detection threshold is ten failures, so insert at least ten rows to
 produce a finding. The authentication fixture uses `event_id` as its
 `ReplacingMergeTree` key and the detection query uses `FINAL`; replaying a
-Tenzir spool after a restart therefore does not double-count a stable event ID.
+collector spool after a restart therefore does not double-count a stable event
+ID.
 Query stored envelopes with:
 
 ```sh

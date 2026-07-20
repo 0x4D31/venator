@@ -14,7 +14,7 @@ first-class workflow.
 - Official ClickHouse source/sink support with bounded queries, TLS/mTLS,
   native or HTTP protocols, and batch finding inserts.
 - Built-in NDJSON stdin, finite-file source, and stdout sink for local agents,
-  workstation snapshots, and Tenzir.
+  workstation snapshots, and bounded producer pipelines.
 - Optional exact-field identity projections for producers whose records contain
   stable event keys alongside volatile scan or run metadata.
 - Generic webhook delivery of canonical findings, with optional Standard
@@ -25,10 +25,10 @@ first-class workflow.
   human-readable run outcomes on stderr, finding-only stdout, and documented
   scheduler-safe exit codes; legacy v0.1 flags remain accepted.
 - Deployment assets for Helm/GKE, plain Kubernetes, launchd, systemd, Nomad,
-  Docker Compose, local agents, ClickHouse, and Tenzir.
+  Docker Compose, local agents, ClickHouse, and optional integrations.
 - Lightweight local-detection guidance for finite inputs, collector
-  checkpoints, durable spool handoff, Raspberry Pi deployments, and the cases
-  where Tenzir alone is the smaller solution.
+  checkpoints, durable spool handoff, Raspberry Pi deployments, and cases where
+  a simpler upstream pipeline is sufficient.
 - Hermetic connector regression tests and GitHub CI for tests, race detection,
   vet, static analysis, vulnerability scanning, static/container builds, Helm,
   and Kustomize rendering.

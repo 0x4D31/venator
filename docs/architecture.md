@@ -73,8 +73,8 @@ key.
 ## State boundary
 
 v0.2.0 deliberately does not keep log data or a hidden scheduler database.
-ClickHouse/OpenSearch/BigQuery own queryable history, and Tenzir or another
-collector owns file watching and parsing. Direct NDJSON allows a local tool to
-provide already filtered candidates. v0.2.0 has no checkpoint state. Any future
-incremental source requires an explicit durable acknowledgement and replay
-contract before it can advance a cursor.
+ClickHouse/OpenSearch/BigQuery can own queryable history, while an external
+collector owns file watching and parsing. Direct NDJSON allows any local tool
+to provide already filtered candidates. v0.2.0 has no checkpoint state. Any
+future incremental source requires an explicit durable acknowledgement and
+replay contract before it can advance a cursor.

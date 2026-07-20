@@ -10,12 +10,7 @@ local deployment small without inventing unsafe replay or checkpoint behavior.
 
 ## When Venator adds value
 
-[Tenzir](https://docs.tenzir.com/reference/operators/) already provides file
-and HTTP acquisition, parsing, filtering, Sigma evaluation, windowing,
-scheduling, AI enrichment, and HTTP output. If one Tenzir pipeline implements
-the complete detection and delivery path you need, use Tenzir alone.
-
-Add Venator when its rule-run contract matters:
+Use Venator when its rule-run contract matters:
 
 - one independently scheduled, observable, and rerunnable job per rule;
 - a versioned canonical finding schema and explicit evidence identity;
@@ -24,20 +19,21 @@ Add Venator when its rule-run contract matters:
 - optional bounded advisory AI review; and
 - an exit status that a scheduler can use for retries and alerting.
 
-The tools are complementary when those properties are useful: a collector or
-query tool selects candidate events, and Venator normalizes and delivers the
-resulting detections.
+An upstream collector, scanner, or query tool may select candidate events;
+Venator is independently responsible for normalizing and delivering the
+resulting detections. If the upstream process already provides every property
+you need, adding another component is unnecessary.
 
 ## Choose the smallest boundary
 
 | Need | Recommended boundary |
 | --- | --- |
 | Completed scanner output or NDJSON batch | `stdin.default` or `file.ndjson` |
-| Ad hoc filtering across completed JSON files | DuckDB or Tenzir, then finite NDJSON |
-| Continuously appended files, rotation, or journald | Fluent Bit or Vector before Venator |
-| Parsing, Sigma, windowing, or completed file spools | Tenzir, alone or before Venator |
-| HTTP event ingestion | Tenzir or a narrow authenticated receiver with a durable queue |
-| Filtering plus one alert destination | Tenzir alone may be sufficient |
+| Ad hoc filtering across completed JSON files | Query or filter first, then emit finite NDJSON |
+| Continuously appended files, rotation, or journald | Checkpointing collector, then completed batches |
+| Parsing, correlation, or windowing | Upstream event processor, then bounded candidates |
+| HTTP event ingestion | Narrow authenticated receiver with a durable queue |
+| Filtering plus one alert destination | A single upstream pipeline may be sufficient |
 | Retained, high-volume history | ClickHouse, OpenSearch, or another query store |
 
 v0.2.0 has no native SQLite connector. Query an application-owned database
@@ -57,8 +53,8 @@ offsets, follow rotations, or wait for appended records.
 
 For both sources, every record remaining after exclusions becomes a finding.
 They do not evaluate a general match expression over arbitrary raw logs.
-Filter upstream with a scanner, SQL, Tenzir, or DuckDB and provide only bounded
-candidate records.
+Filter upstream with a scanner, SQL query, or another bounded processor and
+provide only candidate records.
 
 Preserve both process exit statuses when using a pipe. That reports an upstream
 failure but cannot undo findings published from partial output; stage and
@@ -66,13 +62,11 @@ validate the batch first when producer success must be atomic with publication.
 
 ## Continuous logs and durable spool files
 
-Use [Fluent Bit](https://docs.fluentbit.io/manual/data-pipeline/inputs/tail) or
-[Vector](https://vector.dev/docs/reference/configuration/sources/file/) when a
-growing file or journald needs durable cursors, rotation handling, backpressure,
-and buffering. Use [Tenzir](https://docs.tenzir.com/integrations/file/) for
-parsing, filtering, Sigma evaluation, windowing, or completed spool files; its
-`from_file watch` discovers files rather than checkpointing an append offset.
-A small durable handoff can use this lifecycle:
+Use a checkpointing collector when a growing file or journald needs durable
+cursors, rotation handling, backpressure, and buffering. The collector choice
+is independent of Venator; its acknowledgement and replay behavior must match
+the deployment's durability requirements. A small durable handoff can use this
+lifecycle:
 
 1. Write a uniquely named temporary file on the destination filesystem.
 2. Flush, sync, and close it, then atomically rename it to a `.ready` name on
@@ -145,9 +139,7 @@ supported agent CLI after Venator completes.
 
 ## Raspberry Pi and small hosts
 
-On a 64-bit Raspberry Pi or other small arm64 Linux host, a practical baseline
-is Fluent Bit under systemd for continuous collection and a systemd timer for
-bounded Venator runs. Use Tenzir instead when its parsing, Sigma evaluation, or
-windowing replaces enough custom logic to justify the larger pipeline. Keep
-`runtime.maxRecords`, `runtime.maxBytes`, and timeouts conservative, and run
-heavy investigation on another host.
+On a 64-bit Raspberry Pi or other small arm64 Linux host, use a lightweight
+checkpointing collector for continuous input and a systemd timer for bounded
+Venator runs. Keep `runtime.maxRecords`, `runtime.maxBytes`, and timeouts
+conservative, and run heavy investigation on another host.

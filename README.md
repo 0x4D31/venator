@@ -74,9 +74,10 @@ go build -trimpath -o venator .
 
 The example needs no credentials or external service. It reads a finite NDJSON
 snapshot through `file.ndjson` and emits canonical finding NDJSON through
-`stdout.default`. A separate `stdin.default` source remains ideal for Tenzir or
-agent pipelines. Logs go to stderr, so stdout stays machine-readable. Legacy
-v0.1 flags without the `run` subcommand remain an alias during migration.
+`stdout.default`. A separate `stdin.default` source accepts bounded output from
+scanners, query tools, and agent pipelines. Logs go to stderr, so stdout stays
+machine-readable. Legacy v0.1 flags without the `run` subcommand remain an
+alias during migration.
 
 Use `--report-file run.json` for an atomic JSON run report. Exit status is zero
 for a completed run (including no findings or a disabled rule), one for an
@@ -88,17 +89,18 @@ and `runtime.maxBytes` bound materialized results and canonical output before
 sink fan-out.
 
 File and stdin inputs are finite candidate sets, not tailers or a general
-matching language. Use Tenzir or DuckDB to filter bounded files. Use Fluent Bit
-or Vector when growing files or journald require durable cursors and buffering;
-Tenzir fits parsing, Sigma evaluation, windowing, and completed spools. See
-[lightweight local detection](docs/local-detection.md) for local boundaries and
-home-lab patterns.
+matching language. Use an external query or filtering tool to select candidates
+from completed files. Growing files and journald need a collector that owns
+durable cursors, rotation handling, buffering, and backpressure. Keep parsing,
+correlation, and windowing upstream, then give Venator a completed batch or a
+bounded query. See [lightweight local detection](docs/local-detection.md) for
+local boundaries and home-lab patterns.
 
 ## Sources and sinks
 
 | Connector | Source | Sink | Notes |
 | --- | ---: | ---: | --- |
-| [stdin/stdout NDJSON](connector/stdio/) | yes | yes | Built in; ideal for Tenzir, agents, and pipelines |
+| [stdin/stdout NDJSON](connector/stdio/) | yes | yes | Built in; interoperates with bounded producers, agents, and pipelines |
 | [finite NDJSON file](connector/stdio/) | yes | no | `file.ndjson`; rule-relative path, no hidden checkpoint state |
 | [ClickHouse](connector/clickhouse/) | yes | yes | Official Go driver, native/HTTP, typed rows, bounded queries, batch writes |
 | [OpenSearch](connector/opensearch/) | yes | yes | Bounded SQL/PPL queries and idempotent bulk finding writes |
@@ -109,13 +111,9 @@ home-lab patterns.
 
 ClickHouse configuration and a home-lab Compose stack are in
 [`connector/clickhouse/`](connector/clickhouse/) and
-[`deploy/clickhouse/`](deploy/clickhouse/). Tenzir can either pipe a bounded
-filtered NDJSON batch into Venator or collect into ClickHouse; see
-[`deploy/tenzir-clickhouse/`](deploy/tenzir-clickhouse/).
-
-If a Tenzir pipeline already provides the complete detection and delivery
-behavior you need, use it alone. Venator adds value when finding identity, rule
-isolation, sink fan-out, receipts, and a scheduler-facing exit contract matter.
+[`deploy/clickhouse/`](deploy/clickhouse/). A producer can either pipe a bounded
+filtered NDJSON batch into Venator or retain events in a queryable store;
+neither boundary requires a particular collection or processing product.
 
 ## Rules
 

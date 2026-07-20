@@ -1,6 +1,6 @@
 # A runnable local example: NDJSON candidates on stdin become canonical Venator
-# findings on stdout. Pipe Tenzir, jq, a local agent, or another bounded query
-# into this rule.
+# findings on stdout. Pipe a scanner, query tool, local agent, or another
+# bounded producer into this rule.
 name: local-ndjson-alert
 uid: 6722b4ed-f891-4906-a4b2-f57762dfc72b
 status: stable

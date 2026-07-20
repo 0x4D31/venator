@@ -48,6 +48,5 @@ of disabling all sandboxing.
 
 The sample is a real finite-file run, not an empty-stdin placeholder. It reads
 `events.ndjson` next to the rule. Replace both files with a production source;
-for an actively growing log, use a collector such as Fluent Bit or Vector to
-manage offsets and checkpoints instead of rereading an unbounded file on every
-timer.
+for an actively growing log, use an external checkpointing collector to manage
+offsets and rotation instead of rereading an unbounded file on every timer.

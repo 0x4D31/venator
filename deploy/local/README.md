@@ -66,7 +66,8 @@ For continuously growing files or journald, use a checkpointing collector and
 hand Venator completed candidate batches. Do not use `tail -F | venator`:
 publication waits for EOF, and a row, byte, or time limit may be reached first.
 The [lightweight local-detection guide](../../docs/local-detection.md) covers
-durable spool handoff, Tenzir's role, and 64-bit Raspberry Pi deployments.
+durable spool handoff, collector boundaries, and 64-bit Raspberry Pi
+deployments.
 
 ## Credentials
 

@@ -12,9 +12,12 @@ binary directly runs the rule immediately.
 | macOS user session | launchd agent | [`launchd/`](launchd/) |
 | Container host | Docker Compose plus a host scheduler | [`docker-compose/`](docker-compose/) |
 | Home lab with retained logs | ClickHouse Compose | [`clickhouse/`](clickhouse/) |
-| Local collection and shaping | Tenzir + NDJSON/ClickHouse | [`tenzir-clickhouse/`](tenzir-clickhouse/) |
 | Nomad cluster | Periodic batch job | [`nomad/`](nomad/) |
 | Kubernetes cluster | Helm or CronJob/Kustomize | [`../config/`](../config/) and [`kubernetes/`](kubernetes/) |
+
+An [optional Tenzir integration example](tenzir-clickhouse/) shows how a
+third-party producer can hand off bounded NDJSON or retain events in
+ClickHouse. Venator does not require it or any other collection product.
 
 ## Common configuration contract
 
@@ -46,13 +49,13 @@ and should be retried or alerted on.
 [`examples/`](examples/) is a runnable finite `file.ndjson` snapshot used by the
 host schedulers, so their example jobs do real work without waiting on stdin.
 Production schedules normally use ClickHouse, OpenSearch, BigQuery, or a finite
-spool produced by a collector with explicit checkpoint semantics. If Tenzir
-supplies stdin, schedule a fixed wrapper pipeline and preserve both processes'
-exit statuses.
+spool produced by a collector with explicit checkpoint semantics. If another
+process supplies stdin, schedule a fixed wrapper pipeline and preserve both
+processes' exit statuses.
 
 The [lightweight local-detection guide](../docs/local-detection.md) explains
 finite-input semantics, continuous collector handoff, Raspberry Pi operation,
-and when Tenzir alone is the simpler design.
+and when a simpler upstream pipeline is sufficient.
 
 ## Container image
 

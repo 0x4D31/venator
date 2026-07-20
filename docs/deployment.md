@@ -25,7 +25,6 @@ Deployment templates live in [`deploy/`](../deploy/):
 | [Nomad](../deploy/nomad/) | Periodic cluster batch workloads | Nomad |
 | [Kubernetes](../deploy/kubernetes/) | Detection fleets and GKE operations | Helm or CronJob/Kustomize |
 | [ClickHouse](../deploy/clickhouse/) | Retained home-lab telemetry and findings | Any host scheduler |
-| [Tenzir](../deploy/tenzir-clickhouse/) | Local collection and shaping | Tenzir plus any scheduler |
 
 For finite-input, durable-spool, Raspberry Pi, and agent-handoff patterns, see
 [lightweight local detection](local-detection.md).
