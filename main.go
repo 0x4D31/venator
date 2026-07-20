@@ -26,10 +26,13 @@ var version = "0.2.0"
 
 var logger = logrus.StandardLogger()
 
+const defaultGlobalConfigPath = "config/files/global_config.yaml"
+
 func main() { os.Exit(realMain(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 func realMain(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	logger.SetOutput(stderr)
+	logger.SetLevel(logrus.InfoLevel)
 	if len(arguments) == 0 {
 		printUsage(stderr)
 		return 2
@@ -58,7 +61,7 @@ func realMain(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int
 	case "run":
 		return runCommand(arguments, stdin, stdout, stderr)
 	case "validate":
-		return validateCommand(arguments, stderr)
+		return validateCommand(arguments, stdout, stderr)
 	case "version":
 		if rejectUnexpectedArguments(arguments, stderr) {
 			return 2
@@ -66,10 +69,21 @@ func realMain(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fmt.Fprintf(stdout, "venator %s\n", version)
 		return 0
 	case "help":
-		if rejectUnexpectedArguments(arguments, stderr) {
+		if len(arguments) > 1 {
+			fmt.Fprintf(stderr, "unexpected arguments: %s\n", strings.Join(arguments[1:], " "))
 			return 2
 		}
-		printUsage(stdout)
+		if len(arguments) == 0 {
+			printUsage(stdout)
+			return 0
+		}
+		switch arguments[0] {
+		case "run", "validate", "version":
+			printCommandUsage(stdout, arguments[0])
+		default:
+			fmt.Fprintf(stderr, "unknown help topic %q\n", arguments[0])
+			return 2
+		}
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", command)
@@ -94,14 +108,14 @@ type commandOptions struct {
 	force      bool
 }
 
-func parseOptions(arguments []string, stderr io.Writer, includeRunOptions bool) (*commandOptions, error) {
+func parseOptions(arguments []string, includeRunOptions bool) (*commandOptions, error) {
 	fs := flag.NewFlagSet("venator", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs.SetOutput(io.Discard)
 	opts := &commandOptions{}
 	fs.StringVar(&opts.rulePath, "rule-config", "", "path to the rule YAML")
 	fs.StringVar(&opts.rulePath, "r", "", "path to the rule YAML")
-	fs.StringVar(&opts.globalPath, "global-config", "config/files/global_config.yaml", "path to the global YAML")
-	fs.StringVar(&opts.globalPath, "c", "config/files/global_config.yaml", "path to the global YAML")
+	fs.StringVar(&opts.globalPath, "global-config", defaultGlobalConfigPath, "path to the global YAML")
+	fs.StringVar(&opts.globalPath, "c", defaultGlobalConfigPath, "path to the global YAML")
 	if includeRunOptions {
 		fs.StringVar(&opts.logLevel, "log-level", "info", "trace, debug, info, warn, error")
 		fs.StringVar(&opts.logLevel, "l", "info", "trace, debug, info, warn, error")
@@ -121,12 +135,13 @@ func parseOptions(arguments []string, stderr io.Writer, includeRunOptions bool) 
 }
 
 func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	opts, err := parseOptions(arguments, stderr, true)
+	opts, err := parseOptions(arguments, true)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
+			printCommandUsage(stdout, "run")
 			return 0
 		}
-		fmt.Fprintf(stderr, "invalid arguments: %v\n", err)
+		printArgumentError(stderr, "run", err)
 		return 2
 	}
 	if err := setLogLevel(opts.logLevel); err != nil {
@@ -202,34 +217,54 @@ func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) i
 	if opts.reportFile != "" {
 		if err := writeReport(opts.reportFile, report); err != nil {
 			runErr = errors.Join(runErr, err)
+			report.Status = "failed"
+			report.Error = runErr.Error()
 		}
 	}
+	warnings := 0
 	if report.ReviewError != "" {
+		warnings++
 		logger.WithFields(logrus.Fields{"run_id": report.RunID, "rule_id": report.RuleID}).Warnf("LLM review unavailable: %s", report.ReviewError)
 	}
 	for _, receipt := range report.Sinks {
 		if receipt.Error != "" && !receipt.Required {
+			warnings++
 			logger.WithFields(logrus.Fields{"run_id": report.RunID, "sink": receipt.Name}).Warnf("best-effort publisher failed: %s", receipt.Error)
 		}
 	}
+	fields := logrus.Fields{
+		"rule_name": report.RuleName, "rule_id": report.RuleID, "run_id": report.RunID,
+		"status": report.Status, "queried": report.Queried, "excluded": report.Excluded,
+		"findings": report.Findings, "sinks_attempted": len(report.Sinks), "warnings": warnings,
+		"duration_ms": report.FinishedAt.Sub(report.StartedAt).Milliseconds(),
+	}
+	if opts.force && !rule.Enabled {
+		fields["forced"] = true
+	}
+	entry := logger.WithFields(fields)
 	if runErr != nil {
-		logger.Errorf("run %s failed: %v", report.RunID, runErr)
+		entry.WithError(runErr).Error("rule run failed")
 		return 1
 	}
-	logger.WithFields(logrus.Fields{
-		"run_id": report.RunID, "status": report.Status, "queried": report.Queried,
-		"excluded": report.Excluded, "findings": report.Findings,
-	}).Info("rule run completed")
+	switch {
+	case report.Status == "skipped":
+		entry.WithField("reason", "disabled").Info("rule skipped")
+	case report.Findings == 0:
+		entry.Info("rule run completed with no findings")
+	default:
+		entry.Info("rule run completed with findings")
+	}
 	return 0
 }
 
-func validateCommand(arguments []string, stderr io.Writer) int {
-	opts, err := parseOptions(arguments, stderr, false)
+func validateCommand(arguments []string, stdout, stderr io.Writer) int {
+	opts, err := parseOptions(arguments, false)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
+			printCommandUsage(stdout, "validate")
 			return 0
 		}
-		fmt.Fprintf(stderr, "invalid arguments: %v\n", err)
+		printArgumentError(stderr, "validate", err)
 		return 2
 	}
 	rule, global, err := loadConfigs(opts.rulePath, opts.globalPath)
@@ -255,7 +290,7 @@ func validateCommand(arguments []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "invalid rule file reference: %v\n", err)
 		return 2
 	}
-	fmt.Fprintln(stderr, "configuration is valid")
+	fmt.Fprintln(stdout, "configuration is valid")
 	return 0
 }
 
@@ -287,11 +322,22 @@ func loadConfigs(rulePath, globalPath string) (*config.RuleConfig, *config.Globa
 }
 
 func setLogLevel(level string) error {
-	lvl, err := logrus.ParseLevel(level)
-	if err != nil {
-		return err
+	var parsed logrus.Level
+	switch strings.ToLower(level) {
+	case "trace":
+		parsed = logrus.TraceLevel
+	case "debug":
+		parsed = logrus.DebugLevel
+	case "info":
+		parsed = logrus.InfoLevel
+	case "warn":
+		parsed = logrus.WarnLevel
+	case "error":
+		parsed = logrus.ErrorLevel
+	default:
+		return fmt.Errorf("%q is not one of trace, debug, info, warn, error", level)
 	}
-	logger.SetLevel(lvl)
+	logger.SetLevel(parsed)
 	return nil
 }
 
@@ -333,5 +379,36 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  venator run --rule-config RULE.yaml [--global-config GLOBAL.yaml]")
 	fmt.Fprintln(w, "  venator validate --rule-config RULE.yaml [--global-config GLOBAL.yaml]")
 	fmt.Fprintln(w, "  venator version")
-	fmt.Fprintln(w, "\nLegacy v0.1 flags without the 'run' command remain supported.")
+	fmt.Fprintln(w, "\nRun 'venator help <command>' for command options.")
+	fmt.Fprintln(w, "Legacy v0.1 flags without the 'run' command remain supported.")
+}
+
+func printCommandUsage(w io.Writer, command string) {
+	switch command {
+	case "run":
+		fmt.Fprintln(w, "usage:")
+		fmt.Fprintln(w, "  venator run --rule-config RULE.yaml [options]")
+		fmt.Fprintln(w, "\noptions:")
+		fmt.Fprintln(w, "  -r, --rule-config PATH     rule YAML (required)")
+		fmt.Fprintf(w, "  -c, --global-config PATH   global YAML (default %s)\n", defaultGlobalConfigPath)
+		fmt.Fprintln(w, "  -l, --log-level LEVEL      trace, debug, info, warn, or error (default info)")
+		fmt.Fprintln(w, "      --report-file PATH     atomically write the JSON run report")
+		fmt.Fprintln(w, "      --force                run a disabled rule")
+		fmt.Fprintln(w, "  -h, --help                 show this help")
+	case "validate":
+		fmt.Fprintln(w, "usage:")
+		fmt.Fprintln(w, "  venator validate --rule-config RULE.yaml [options]")
+		fmt.Fprintln(w, "\noptions:")
+		fmt.Fprintln(w, "  -r, --rule-config PATH     rule YAML (required)")
+		fmt.Fprintf(w, "  -c, --global-config PATH   global YAML (default %s)\n", defaultGlobalConfigPath)
+		fmt.Fprintln(w, "  -h, --help                 show this help")
+	case "version":
+		fmt.Fprintln(w, "usage:")
+		fmt.Fprintln(w, "  venator version")
+	}
+}
+
+func printArgumentError(w io.Writer, command string, err error) {
+	fmt.Fprintf(w, "invalid arguments: %v\n", err)
+	fmt.Fprintf(w, "Run 'venator %s --help' for usage.\n", command)
 }
