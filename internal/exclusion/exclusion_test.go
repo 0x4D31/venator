@@ -176,7 +176,7 @@ func TestNewExcluderRejectsUnknownFieldsAndMixedBooleanGroups(t *testing.T) {
 			name: "null and plus populated or",
 			content: "- conditions:\n    and: null\n    or:\n" +
 				"      - field: x\n        operator: equals\n        value: z\n",
-			want: "mutually exclusive",
+			want: "must be a YAML sequence",
 		},
 		{
 			name: "populated and plus empty or",
@@ -206,9 +206,9 @@ func TestNewExcluderRequiresExactlyOneNonEmptyBooleanGroup(t *testing.T) {
 	}{
 		{name: "missing", conditions: "{}", want: "one of and/or is required"},
 		{name: "empty and", conditions: "{and: []}", want: "and must be non-empty"},
-		{name: "null and", conditions: "{and: null}", want: "and must be non-empty"},
+		{name: "null and", conditions: "{and: null}", want: "must be a YAML sequence"},
 		{name: "empty or", conditions: "{or: []}", want: "or must be non-empty"},
-		{name: "null or", conditions: "{or: null}", want: "or must be non-empty"},
+		{name: "null or", conditions: "{or: null}", want: "must be a YAML sequence"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -243,6 +243,42 @@ func TestNewExcluderRejectsMultipleYAMLDocuments(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestNewExcluderRejectsYAMLMergeKeys(t *testing.T) {
+	content := `
+- &base
+  conditions:
+    and:
+      - field: user
+        operator: equals
+        value: alice
+- <<: *base
+`
+	path := filepath.Join(t.TempDir(), "exclusions.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), "YAML merge keys are not supported") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestNewExcluderRejectsAliasMappingKeys(t *testing.T) {
+	content := `
+- conditions:
+    and:
+      - field: &control_key operator
+        *control_key: equals
+        value: alice
+`
+	path := filepath.Join(t.TempDir(), "exclusions.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewExcluder(path); err == nil || !strings.Contains(err.Error(), "aliases are not supported as mapping keys") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -357,5 +393,22 @@ func TestNewExcluderValidatesOperatorShape(t *testing.T) {
 				t.Fatalf("condition did not exclude %#v", tt.wantRecord)
 			}
 		})
+	}
+}
+
+func TestNullDoesNotMatchTextExclusions(t *testing.T) {
+	empty := ""
+	values := []string{""}
+	conditions := []Condition{
+		{Field: "value", Operator: "equals", Value: &empty},
+		{Field: "value", Operator: "not_equals", Value: &empty},
+		{Field: "value", Operator: "contains", Value: &empty},
+		{Field: "value", Operator: "in", Values: &values},
+		{Field: "value", Operator: "not_in", Values: &values},
+	}
+	for _, condition := range conditions {
+		if evaluateCondition(condition, model.Record{"value": nil}) {
+			t.Errorf("operator %q matched a null value", condition.Operator)
+		}
 	}
 }

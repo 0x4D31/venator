@@ -20,10 +20,13 @@ services:
     # unset and Venator can report the unresolved ${NAME} reference clearly.
     environment:
       - OPENSEARCH_PASSWORD
-      - OPENSEARCH_DEV_PASSWORD
       - SLACK_WEBHOOK_URL
       - CLICKHOUSE_PASSWORD
-      - LLM_API_KEY
+      - OPENAI_API_KEY
+      - OPENAI_MODEL
+      - AGENT_WEBHOOK_URL
+      - AGENT_WEBHOOK_TOKEN
+      - AGENT_WEBHOOK_SECRET
     volumes:
       - ${VENATOR_CONFIG_DIR:-../../config}:/etc/venator:ro
     read_only: true

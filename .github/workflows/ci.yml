@@ -195,6 +195,16 @@ jobs:
           expect_failure "non-string enabled-rule schedule" "${helm_template[@]}"
           sed -i 's/schedule: 5/schedule: "5 * * * *"/' "$rule"
 
+          sed -i 's/^uid:.*/uid: 123/' "$rule"
+          expect_failure "non-string rule uid" "${helm_template[@]}"
+          sed -i 's/^uid:.*/uid: 6722b4ed-f891-4906-a4b2-f57762dfc72b/' "$rule"
+
+          cp "$rule" /tmp/venator-chart/rules/example/duplicate-uid.yaml
+          sed -i 's/name: local-ndjson-alert/name: duplicate-uid/' \
+            /tmp/venator-chart/rules/example/duplicate-uid.yaml
+          expect_failure "duplicate rule uid" "${helm_template[@]}"
+          rm /tmp/venator-chart/rules/example/duplicate-uid.yaml
+
           expect_failure "unknown rule-scoped value key" "${helm_template[@]}" \
               --set-string 'ruleServiceAccounts.misspelled-rule=venator'
 

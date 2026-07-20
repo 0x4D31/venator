@@ -14,5 +14,5 @@ output:
 description: Kubernetes smoke rule over a mounted finite NDJSON snapshot.
 references: []
 tags: [example, kubernetes]
-author: 0x4D31
+author: "0x4D31"
 ttps: []

@@ -185,6 +185,95 @@ func TestParseGlobalConfig(t *testing.T) {
 	}
 }
 
+func TestParseGlobalConfigAppliesWebhookDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	contents := `runtime:
+  maxRecords: 50
+  maxBytes: 2097152
+  timeout: 1m
+webhook:
+  instances:
+    agent:
+      url: https://agent.example.test/venator
+      headers:
+        Authorization: Bearer ${AGENT_TOKEN}
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ParseGlobalConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Webhook.Instances["agent"]
+	if got.Timeout.Value() != 20*time.Second || got.MaxAttempts != 3 || got.MaxFindings != 100 || got.MaxPayloadBytes != 1<<20 {
+		t.Fatalf("webhook defaults = %#v", got)
+	}
+	if got.Headers["Authorization"] != "Bearer ${AGENT_TOKEN}" {
+		t.Fatalf("webhook headers = %#v", got.Headers)
+	}
+}
+
+func TestParseGlobalConfigAcceptsCaseInsensitiveWebhookScheme(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	contents := `runtime:
+  maxRecords: 50
+  maxBytes: 2097152
+  timeout: 1m
+webhook:
+  instances:
+    agent:
+      url: HTTPS://agent.example.test/venator
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParseGlobalConfigRejectsNumericDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	contents := "runtime:\n  maxRecords: 50\n  maxBytes: 2097152\n  timeout: 0\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(path); err == nil || !strings.Contains(err.Error(), "duration must be a YAML string") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestParseGlobalConfigRejectsUnsafeWebhookConfiguration(t *testing.T) {
+	tests := []struct {
+		name    string
+		webhook string
+		want    string
+	}{
+		{name: "non-TLS remote URL", webhook: "url: http://agent.example.test/hook", want: "invalid url"},
+		{name: "non-literal loopback URL", webhook: "url: http://localhost:8080/hook", want: "invalid url"},
+		{name: "reserved header", webhook: "url: https://agent.example.test/hook\n      headers: {Webhook-ID: chosen}", want: "invalid or reserved"},
+		{name: "case-duplicate header", webhook: "url: https://agent.example.test/hook\n      headers: {X-Test: one, x-test: two}", want: "different casing"},
+		{name: "invalid signing secret", webhook: "url: https://agent.example.test/hook\n      signingSecret: whsec_not-base64", want: "signingSecret"},
+		{name: "null signing secret", webhook: "url: https://agent.example.test/hook\n      signingSecret: null", want: "signingSecret must be a YAML string"},
+		{name: "null authorization header", webhook: "url: https://agent.example.test/hook\n      headers: {Authorization: null}", want: "Authorization must be a YAML string"},
+		{name: "null attempt limit", webhook: "url: https://agent.example.test/hook\n      maxAttempts: null", want: "maxAttempts must be a YAML integer"},
+		{name: "oversized payload limit", webhook: "url: https://agent.example.test/hook\n      maxPayloadBytes: 10485761", want: "maxPayloadBytes"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "global.yaml")
+			contents := "runtime:\n  maxRecords: 50\n  maxBytes: 16777216\n  timeout: 1m\nwebhook:\n  instances:\n    agent:\n      " + test.webhook + "\n"
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseGlobalConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestConfigParsersRejectMultipleYAMLDocuments(t *testing.T) {
 	dir := t.TempDir()
 	global := filepath.Join(dir, "global.yaml")
@@ -215,7 +304,85 @@ name: two
 	}
 }
 
-func TestParseRuleConfigRejectsInvalidEnabledAndScheduleTypes(t *testing.T) {
+func TestConfigParsersRejectYAMLMergeKeys(t *testing.T) {
+	dir := t.TempDir()
+	global := filepath.Join(dir, "global.yaml")
+	globalContents := "defaults: &defaults\n  maxRecords: 10\nruntime:\n  <<: *defaults\n  maxBytes: 1024\n  timeout: 1m\n"
+	if err := os.WriteFile(global, []byte(globalContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(global); err == nil || !strings.Contains(err.Error(), "YAML merge keys are not supported") {
+		t.Fatalf("global error = %v", err)
+	}
+
+	rule := filepath.Join(dir, "rule.yaml")
+	ruleContents := `defaults: &defaults
+  schedule: 123
+  identity:
+    fields: [record_id, 123]
+<<: *defaults
+name: merged
+uid: merged
+confidence: low
+enabled: false
+queryEngine: stdin.default
+publishers: [stdout.default]
+language: NDJSON
+query: ""
+output: {format: raw, fields: []}
+`
+	if err := os.WriteFile(rule, []byte(ruleContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseRuleConfig(rule); err == nil || !strings.Contains(err.Error(), "YAML merge keys are not supported") {
+		t.Fatalf("rule error = %v", err)
+	}
+}
+
+func TestParseRuleConfigRejectsAliasMappingKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{name: "top level", contents: `description: &control_key uid
+*control_key: 123
+name: alias-key
+confidence: low
+enabled: false
+queryEngine: stdin.default
+publishers: [stdout.default]
+language: NDJSON
+query: ""
+output: {format: raw, fields: []}
+`},
+		{name: "nested identity", contents: `description: &control_key fields
+name: alias-key
+uid: alias-key
+confidence: low
+enabled: false
+queryEngine: stdin.default
+publishers: [stdout.default]
+language: NDJSON
+query: ""
+identity:
+  *control_key: [123]
+output: {format: raw, fields: []}
+`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rule.yaml")
+			if err := os.WriteFile(path, []byte(tt.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), "aliases are not supported as mapping keys") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestParseRuleConfigRejectsInvalidControlFieldTypes(t *testing.T) {
 	base, err := os.ReadFile(existentConfigPath)
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +394,9 @@ func TestParseRuleConfigRejectsInvalidEnabledAndScheduleTypes(t *testing.T) {
 		want        string
 	}{
 		{name: "null enabled", old: "enabled: true", replacement: "enabled: null", want: "enabled must be a YAML boolean"},
+		{name: "numeric name", old: "name: test-rule", replacement: "name: 123", want: "name must be a YAML string"},
+		{name: "numeric uid", old: "uid: 2001416b-bdd3-4a31-af52-3b1933c4f926", replacement: "uid: 123", want: "uid must be a YAML string"},
+		{name: "boolean exclusions path", old: "exclusionsPath: test-exclusions.yaml", replacement: "exclusionsPath: true", want: "exclusionsPath must be a YAML string"},
 		{name: "null schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: null", want: "schedule must be a YAML string"},
 		{name: "numeric schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: 5", want: "schedule must be a YAML string"},
 		{name: "boolean schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: true", want: "schedule must be a YAML string"},
@@ -243,6 +413,42 @@ func TestParseRuleConfigRejectsInvalidEnabledAndScheduleTypes(t *testing.T) {
 			}
 			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseRuleConfigRejectsCoercedReviewPolicy(t *testing.T) {
+	tests := []struct {
+		name  string
+		block string
+		want  string
+	}{
+		{name: "null enabled", block: "enabled: null\n    prompt: review", want: "llm.enabled must be a YAML boolean"},
+		{name: "null required", block: "enabled: true\n    required: null\n    prompt: review", want: "llm.required must be a YAML boolean"},
+		{name: "null evidence allowlist", block: "enabled: true\n    evidenceFields: null\n    prompt: review", want: "llm.evidenceFields must be a YAML sequence"},
+		{name: "null redaction list", block: "enabled: true\n    redactFields: null\n    prompt: review", want: "llm.redactFields must be a YAML sequence"},
+		{name: "numeric prompt", block: "enabled: true\n    prompt: 123", want: "llm.prompt must be a YAML string"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rule.yaml")
+			contents := `name: strict-review
+uid: strict-review
+confidence: high
+enabled: true
+queryEngine: stdin.default
+language: NDJSON
+query: ""
+publishers: [stdout.default]
+output: {format: raw, fields: []}
+llm:
+    ` + test.block + "\n"
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
 			}
 		})
 	}
@@ -517,7 +723,7 @@ output:
 			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), "identity.fields must contain only YAML strings") {
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), "must be a YAML string") {
 				t.Fatalf("error = %v", err)
 			}
 		})

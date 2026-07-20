@@ -1,4 +1,5 @@
 {{- $ruleNames := dict }}
+{{- $ruleUIDs := dict }}
 {{- range $path, $_ := .Files.Glob "rules/**.yaml" }}
 {{- $cfg := $.Files.Get $path | fromYaml }}
 {{- if or (not (kindIs "string" $cfg.name)) (gt (len $cfg.name) 52) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $cfg.name)) }}
@@ -11,6 +12,18 @@
 {{- fail (printf "rules %s and %s use duplicate name %q" (get $ruleNames $cfg.name) $path $cfg.name) }}
 {{- end }}
 {{- $_ := set $ruleNames $cfg.name $path }}
+{{- if or (not (kindIs "string" $cfg.uid)) (eq (trim $cfg.uid) "") }}
+{{- fail (printf "rule in %s uid must be a non-empty string" $path) }}
+{{- end }}
+{{- if and (hasKey $cfg "enabled") (not (kindIs "bool" $cfg.enabled)) }}
+{{- fail (printf "rule %s enabled must be a boolean" $cfg.name) }}
+{{- end }}
+{{- if eq $cfg.enabled true }}
+{{- if hasKey $ruleUIDs $cfg.uid }}
+{{- fail (printf "rules %s and %s use duplicate uid %q" (get $ruleUIDs $cfg.uid) $path $cfg.uid) }}
+{{- end }}
+{{- $_ := set $ruleUIDs $cfg.uid $path }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

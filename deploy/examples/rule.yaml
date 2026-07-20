@@ -14,5 +14,5 @@ output:
 description: Emit findings for a finite local NDJSON snapshot.
 references: []
 tags: [example, local]
-author: 0x4D31
+author: "0x4D31"
 ttps: []

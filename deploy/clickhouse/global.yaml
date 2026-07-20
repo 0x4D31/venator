@@ -1,7 +1,7 @@
 runtime:
   maxRecords: 10000
   maxBytes: 67108864
-  timeout: 15m
+  timeout: 5m
 
 clickhouse:
   instances:

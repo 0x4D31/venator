@@ -24,8 +24,15 @@ jobs:
         run: |
           source_version="$(go run . version)"
           source_version="${source_version#venator }"
-          if [ "$GITHUB_REF_NAME" != "v${source_version}" ]; then
-            echo "tag $GITHUB_REF_NAME does not match source version $source_version" >&2
+          release_version="${GITHUB_REF_NAME#v}"
+          chart_version="$(awk '$1 == "version:" { print $2 }' config/Chart.yaml)"
+          chart_app_version="$(awk '$1 == "appVersion:" { gsub(/"/, "", $2); print $2 }' config/Chart.yaml)"
+          image_version="$(sed -n 's#^  image: ghcr.io/0x4d31/venator:v##p' config/values.yaml)"
+          if [ "$release_version" != "$source_version" ] || \
+             [ "$release_version" != "$chart_version" ] || \
+             [ "$release_version" != "$chart_app_version" ] || \
+             [ "$release_version" != "$image_version" ]; then
+            echo "release versions disagree: tag=$release_version binary=$source_version chart=$chart_version appVersion=$chart_app_version image=$image_version" >&2
             exit 1
           fi
           go test -count=1 ./...

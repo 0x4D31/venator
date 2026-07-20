@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/0x4D31/venator/internal/yamlshape"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -127,81 +128,13 @@ func ParseRuleConfig(path string) (*RuleConfig, error) {
 }
 
 func validateRuleScalarTypes(document *yaml.Node) error {
-	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
-		return nil
-	}
-	root, err := resolveRuleAlias(document.Content[0])
-	if err != nil {
+	if err := yamlshape.RejectMergeKeys(document); err != nil {
 		return err
 	}
-	if root.Kind != yaml.MappingNode {
-		return nil
+	if err := yamlshape.RejectAliasMappingKeys(document); err != nil {
+		return err
 	}
-	for i := 0; i < len(root.Content); i += 2 {
-		key := root.Content[i]
-		value, err := resolveRuleAlias(root.Content[i+1])
-		if err != nil {
-			return err
-		}
-		switch key.Value {
-		case "enabled":
-			if value.Kind != yaml.ScalarNode || value.Tag != "!!bool" {
-				return fmt.Errorf("enabled must be a YAML boolean")
-			}
-		case "identity":
-			if err := validateIdentityScalarTypes(value); err != nil {
-				return err
-			}
-		case "schedule":
-			if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
-				return fmt.Errorf("schedule must be a YAML string")
-			}
-		}
-	}
-	return nil
-}
-
-func validateIdentityScalarTypes(identity *yaml.Node) error {
-	if identity.Kind != yaml.MappingNode {
-		return nil // The strict decoder reports the structural error.
-	}
-	for i := 0; i < len(identity.Content); i += 2 {
-		if identity.Content[i].Value != "fields" {
-			continue
-		}
-		fields, err := resolveRuleAlias(identity.Content[i+1])
-		if err != nil {
-			return err
-		}
-		if fields.Kind != yaml.SequenceNode {
-			return nil // The strict decoder reports the structural error.
-		}
-		for _, fieldNode := range fields.Content {
-			field, err := resolveRuleAlias(fieldNode)
-			if err != nil {
-				return err
-			}
-			if field.Kind != yaml.ScalarNode || field.Tag != "!!str" {
-				return fmt.Errorf("identity.fields must contain only YAML strings")
-			}
-		}
-	}
-	return nil
-}
-
-func resolveRuleAlias(node *yaml.Node) (*yaml.Node, error) {
-	seen := map[*yaml.Node]struct{}{}
-	for node != nil && node.Kind == yaml.AliasNode {
-		if _, duplicate := seen[node]; duplicate {
-			return nil, fmt.Errorf("recursive YAML alias")
-		}
-		seen[node] = struct{}{}
-		node = node.Alias
-	}
-	if node == nil {
-		return nil, fmt.Errorf("invalid YAML alias")
-	}
-	return node, nil
+	return yamlshape.ValidateTypes(document, RuleConfig{})
 }
 
 func openRegularConfigFile(path string) (*os.File, error) {

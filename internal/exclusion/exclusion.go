@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/0x4D31/venator/internal/model"
+	"github.com/0x4D31/venator/internal/yamlshape"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -154,8 +155,17 @@ func NewExcluder(path string) (*Excluder, error) {
 	if err := requireExclusionYAMLEOF(shapeDecoder); err != nil {
 		return nil, err
 	}
+	if err := yamlshape.RejectMergeKeys(&document); err != nil {
+		return nil, fmt.Errorf("failed to decode exclusions YAML: %w", err)
+	}
+	if err := yamlshape.RejectAliasMappingKeys(&document); err != nil {
+		return nil, fmt.Errorf("failed to decode exclusions YAML: %w", err)
+	}
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.SequenceNode {
 		return nil, fmt.Errorf("failed to decode exclusions YAML: top-level value must be a list")
+	}
+	if err := yamlshape.ValidateTypes(&document, []ExclusionRule{}); err != nil {
+		return nil, fmt.Errorf("failed to decode exclusions YAML: %w", err)
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("failed to rewind exclusions file: %w", err)
@@ -309,7 +319,7 @@ func evaluateConditionGroup(group ConditionGroup, result model.Record) bool {
 
 func evaluateCondition(cond Condition, result model.Record) bool {
 	rawValue, exists := result[cond.Field]
-	if !exists {
+	if !exists || rawValue == nil {
 		return false
 	}
 	value, ok := model.StringValue(rawValue)

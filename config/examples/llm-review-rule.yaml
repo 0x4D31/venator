@@ -12,7 +12,7 @@ output:
   fields: []
 description: Apply advisory review to the bundled finite NDJSON example.
 tags: [example, local, llm]
-author: 0x4D31
+author: "0x4D31"
 llm:
   enabled: true
   required: false

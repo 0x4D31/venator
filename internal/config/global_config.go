@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"reflect"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0x4D31/venator/internal/yamlshape"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -30,6 +33,7 @@ type GlobalConfig struct {
 	BigQuery   BigQueryConnectors   `yaml:"bigquery"`
 	ClickHouse ClickHouseConnectors `yaml:"clickhouse"`
 	Slack      SlackConnectors      `yaml:"slack"`
+	Webhook    WebhookConnectors    `yaml:"webhook"`
 	LLM        LLMConfig            `yaml:"llm"`
 	Runtime    RuntimeConfig        `yaml:"runtime"`
 }
@@ -54,6 +58,10 @@ type ClickHouseConnectors struct {
 	Instances map[string]ClickHouseConfig `yaml:"instances"`
 }
 
+type WebhookConnectors struct {
+	Instances map[string]WebhookConfig `yaml:"instances"`
+}
+
 type RuntimeConfig struct {
 	MaxRecords int      `yaml:"maxRecords"`
 	MaxBytes   int64    `yaml:"maxBytes"`
@@ -63,6 +71,9 @@ type RuntimeConfig struct {
 type Duration time.Duration
 
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+		return fmt.Errorf("duration must be a YAML string")
+	}
 	parsed, err := time.ParseDuration(value.Value)
 	if err != nil {
 		return fmt.Errorf("invalid duration %q: %w", value.Value, err)
@@ -97,6 +108,16 @@ type BigQueryConfig struct {
 type SlackConfig struct {
 	WebhookURL  string `yaml:"webhookURL,omitempty"`
 	MaxFindings int    `yaml:"maxFindings"`
+}
+
+type WebhookConfig struct {
+	URL             string            `yaml:"url"`
+	Headers         map[string]string `yaml:"headers,omitempty"`
+	SigningSecret   string            `yaml:"signingSecret,omitempty"`
+	Timeout         Duration          `yaml:"timeout"`
+	MaxAttempts     int               `yaml:"maxAttempts"`
+	MaxFindings     int               `yaml:"maxFindings"`
+	MaxPayloadBytes int64             `yaml:"maxPayloadBytes"`
 }
 
 type ClickHouseConfig struct {
@@ -156,6 +177,23 @@ func ParseGlobalConfig(path string) (*GlobalConfig, error) {
 	fileContent, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read global config file: %w", err)
+	}
+	var document yaml.Node
+	shapeDecoder := yaml.NewDecoder(strings.NewReader(string(fileContent)))
+	if err := shapeDecoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("failed to decode global config YAML: %w", err)
+	}
+	if err := requireYAMLEOF(shapeDecoder); err != nil {
+		return nil, fmt.Errorf("failed to decode global config YAML: %w", err)
+	}
+	if err := yamlshape.RejectMergeKeys(&document); err != nil {
+		return nil, fmt.Errorf("failed to decode global config YAML: %w", err)
+	}
+	if err := yamlshape.RejectAliasMappingKeys(&document); err != nil {
+		return nil, fmt.Errorf("failed to decode global config YAML: %w", err)
+	}
+	if err := yamlshape.ValidateTypes(&document, GlobalConfig{}); err != nil {
+		return nil, fmt.Errorf("failed to decode global config YAML: %w", err)
 	}
 
 	// Decode before interpolation so secret values can never inject YAML. Each
@@ -337,6 +375,21 @@ func (c *GlobalConfig) applyDefaults() {
 		}
 		c.Slack.Instances[name] = instance
 	}
+	for name, instance := range c.Webhook.Instances {
+		if instance.Timeout == 0 {
+			instance.Timeout = Duration(20 * time.Second)
+		}
+		if instance.MaxAttempts == 0 {
+			instance.MaxAttempts = 3
+		}
+		if instance.MaxFindings == 0 {
+			instance.MaxFindings = 100
+		}
+		if instance.MaxPayloadBytes == 0 {
+			instance.MaxPayloadBytes = min(int64(1<<20), c.Runtime.MaxBytes)
+		}
+		c.Webhook.Instances[name] = instance
+	}
 	for name, instance := range c.ClickHouse.Instances {
 		if instance.Protocol == "" {
 			instance.Protocol = "native"
@@ -403,6 +456,9 @@ func (c *GlobalConfig) Validate() error {
 	if err := validateConnectorInstanceNames("slack", c.Slack.Instances); err != nil {
 		return err
 	}
+	if err := validateConnectorInstanceNames("webhook", c.Webhook.Instances); err != nil {
+		return err
+	}
 	if err := validateConnectorInstanceNames("clickhouse", c.ClickHouse.Instances); err != nil {
 		return err
 	}
@@ -447,6 +503,11 @@ func (c *GlobalConfig) Validate() error {
 			return fmt.Errorf("slack instance %q maxFindings must be between 1 and 50", name)
 		}
 	}
+	for name, instance := range c.Webhook.Instances {
+		if err := validateWebhookConfig(instance, c.Runtime.MaxBytes); err != nil {
+			return fmt.Errorf("webhook instance %q %w", name, err)
+		}
+	}
 	for name, instance := range c.ClickHouse.Instances {
 		if len(instance.Addresses) == 0 {
 			return fmt.Errorf("clickhouse instance %q requires at least one address", name)
@@ -489,6 +550,87 @@ func (c *GlobalConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateWebhookConfig(cfg WebhookConfig, runtimeMaxBytes int64) error {
+	if strings.TrimSpace(cfg.URL) == "" {
+		return errors.New("requires url")
+	}
+	if !hasEnvironmentReference(cfg.URL) && !validWebhookURL(cfg.URL) {
+		return errors.New("has invalid url")
+	}
+	if cfg.Timeout.Value() <= 0 {
+		return errors.New("timeout must be positive")
+	}
+	if cfg.MaxAttempts < 1 || cfg.MaxAttempts > 10 {
+		return errors.New("maxAttempts must be between 1 and 10")
+	}
+	if cfg.MaxFindings < 1 || cfg.MaxFindings > 1000 {
+		return errors.New("maxFindings must be between 1 and 1000")
+	}
+	payloadLimit := min(runtimeMaxBytes, int64(10<<20))
+	if cfg.MaxPayloadBytes < 1 || cfg.MaxPayloadBytes > payloadLimit {
+		return fmt.Errorf("maxPayloadBytes must be between 1 and %d", payloadLimit)
+	}
+	if cfg.SigningSecret != "" && !hasEnvironmentReference(cfg.SigningSecret) && !validStandardWebhookSecret(cfg.SigningSecret) {
+		return errors.New("signingSecret must be whsec_ followed by base64 encoding 24 to 64 random bytes")
+	}
+	seenHeaders := make(map[string]struct{}, len(cfg.Headers))
+	for name, value := range cfg.Headers {
+		if !validWebhookHeaderName(name) {
+			return fmt.Errorf("header name %q is invalid or reserved", name)
+		}
+		lowerName := strings.ToLower(name)
+		if _, duplicate := seenHeaders[lowerName]; duplicate {
+			return fmt.Errorf("header %q is duplicated with different casing", name)
+		}
+		if !validWebhookHeaderValue(value) {
+			return fmt.Errorf("header %q contains an invalid value", name)
+		}
+		seenHeaders[lowerName] = struct{}{}
+	}
+	return nil
+}
+
+func validStandardWebhookSecret(value string) bool {
+	if strings.TrimSpace(value) != value || !strings.HasPrefix(value, "whsec_") {
+		return false
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(strings.TrimPrefix(value, "whsec_"))
+	return err == nil && len(decoded) >= 24 && len(decoded) <= 64
+}
+
+func validWebhookHeaderName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		character := value[i]
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character)) {
+			continue
+		}
+		return false
+	}
+	switch strings.ToLower(value) {
+	case "accept", "connection", "content-encoding", "content-length", "content-type", "host", "idempotency-key",
+		"proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
+		"venator-finding-id", "webhook-id", "webhook-signature", "webhook-timestamp":
+		return false
+	default:
+		return true
+	}
+}
+
+func validWebhookHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		character := value[i]
+		if character == '\t' || character >= 0x20 && character != 0x7f {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func hasEnvironmentReference(value string) bool {
@@ -562,6 +704,23 @@ func validSlackURL(value string) bool {
 		return true
 	}
 	return parsed.Scheme == "http" && (parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1")
+}
+
+func validWebhookURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || strings.TrimSpace(value) != value || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil ||
+		parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme == "https" {
+		return true
+	}
+	if scheme != "http" {
+		return false
+	}
+	ip := net.ParseIP(parsed.Hostname())
+	return ip != nil && ip.IsLoopback()
 }
 
 func safeTableIdentifier(table string) bool {

@@ -13,6 +13,7 @@ import (
 	"github.com/0x4D31/venator/connector/pubsub"
 	"github.com/0x4D31/venator/connector/slack"
 	"github.com/0x4D31/venator/connector/stdio"
+	"github.com/0x4D31/venator/connector/webhook"
 	"github.com/0x4D31/venator/internal/config"
 )
 
@@ -70,6 +71,7 @@ func NewRegistry(ctx context.Context, globalCfg *config.GlobalConfig, stdin io.R
 	r.registerBigQuery(globalCfg.BigQuery, globalCfg.Runtime.MaxRecords, globalCfg.Runtime.MaxBytes)
 	r.registerClickHouse(globalCfg.ClickHouse)
 	r.registerSlack(globalCfg.Slack)
+	r.registerWebhook(globalCfg.Webhook)
 	return r
 }
 
@@ -270,6 +272,40 @@ func (r *Registry) registerSlack(connectors config.SlackConnectors) {
 		}
 		r.publisherFactories[instance] = func(ctx context.Context) (Publisher, error) { return factory(ctx) }
 	}
+}
+
+func (r *Registry) registerWebhook(connectors config.WebhookConnectors) {
+	for name, value := range connectors.Instances {
+		cfg := cloneWebhookConfig(value)
+		instance := "webhook." + name
+		factory := func(ctx context.Context) (*webhook.Client, error) {
+			resolved := cloneWebhookConfig(cfg)
+			if err := config.ResolveEnv(&resolved); err != nil {
+				return nil, err
+			}
+			return webhook.New(ctx, webhook.Config{
+				URL: resolved.URL, Headers: resolved.Headers, SigningSecret: resolved.SigningSecret,
+				Timeout: resolved.Timeout.Value(), MaxAttempts: resolved.MaxAttempts,
+				MaxFindings: resolved.MaxFindings, MaxPayloadBytes: int(resolved.MaxPayloadBytes),
+			})
+		}
+		r.publisherValidators[instance] = func(ctx context.Context) error {
+			_, err := factory(ctx)
+			return err
+		}
+		r.publisherFactories[instance] = func(ctx context.Context) (Publisher, error) { return factory(ctx) }
+	}
+}
+
+func cloneWebhookConfig(cfg config.WebhookConfig) config.WebhookConfig {
+	if cfg.Headers != nil {
+		headers := cfg.Headers
+		cfg.Headers = make(map[string]string, len(cfg.Headers))
+		for name, value := range headers {
+			cfg.Headers[name] = value
+		}
+	}
+	return cfg
 }
 
 func (r *Registry) GetQueryRunner(name string) (QueryRunner, error) {

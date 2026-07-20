@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -105,6 +106,63 @@ func TestRegistryPropagatesOpenSearchSQLFetchSize(t *testing.T) {
 	}
 	if _, err := runner.Query(context.Background(), &config.RuleConfig{Language: "SQL", Query: "SELECT value"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWebhookConnectorResolvesEnvironmentWithoutMutatingGlobalConfig(t *testing.T) {
+	secret := "whsec_" + base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if got := r.Header.Get("Authorization"); got != "Bearer local-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if r.Header.Get("Webhook-Signature") == "" || r.Header.Get("Webhook-ID") == "" {
+			t.Error("signed webhook headers are missing")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("VENATOR_WEBHOOK_URL", server.URL)
+	t.Setenv("VENATOR_WEBHOOK_TOKEN", "local-token")
+	t.Setenv("VENATOR_WEBHOOK_SECRET", secret)
+
+	global := &config.GlobalConfig{
+		Runtime: config.RuntimeConfig{MaxRecords: 10, MaxBytes: 1 << 20, Timeout: config.Duration(time.Minute)},
+		Webhook: config.WebhookConnectors{Instances: map[string]config.WebhookConfig{
+			"agent": {
+				URL: "${VENATOR_WEBHOOK_URL}", Headers: map[string]string{"Authorization": "Bearer ${VENATOR_WEBHOOK_TOKEN}"},
+				SigningSecret: "${VENATOR_WEBHOOK_SECRET}", Timeout: config.Duration(time.Second),
+				MaxAttempts: 1, MaxFindings: 10, MaxPayloadBytes: 1 << 20,
+			},
+		}},
+	}
+	registry := NewRegistry(context.Background(), global, strings.NewReader(""), io.Discard)
+	t.Cleanup(func() { _ = registry.Close() })
+	rule := &config.RuleConfig{QueryEngine: "stdin.default", Publishers: []string{"webhook.agent"}}
+	if err := registry.PreflightRule(rule); err != nil {
+		t.Fatal(err)
+	}
+	publisher, err := registry.GetPublisher("webhook.agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 19, 12, 0, 0, 0, time.UTC)
+	if err := publisher.Publish(context.Background(), model.PublishBatch{
+		RunID: "run-1",
+		Findings: []model.Finding{{
+			SchemaVersion: model.FindingSchemaVersion, ID: "finding-1", RunID: "run-1", DetectedAt: now,
+			Source: "stdin.default", OutputFormat: "raw", Rule: model.RuleMetadata{ID: "rule-1"}, Payload: model.Record{"event": "test"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
+	}
+	original := global.Webhook.Instances["agent"]
+	if original.URL != "${VENATOR_WEBHOOK_URL}" || original.Headers["Authorization"] != "Bearer ${VENATOR_WEBHOOK_TOKEN}" || original.SigningSecret != "${VENATOR_WEBHOOK_SECRET}" {
+		t.Fatalf("global webhook config was mutated: %#v", original)
 	}
 }
 

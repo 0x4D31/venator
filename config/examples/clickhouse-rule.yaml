@@ -17,7 +17,7 @@ query: |
     map('failures', count()) AS rule_specific_data
   FROM security.authentication FINAL
   WHERE outcome = 'failure'
-    AND timestamp >= now() - INTERVAL 15 MINUTE
+    AND timestamp >= now() - INTERVAL 20 MINUTE
   GROUP BY username, source_ip
   HAVING count() >= 10
 output:
@@ -34,7 +34,7 @@ output:
 description: Detect a burst of failed authentications from one user and source address.
 references: []
 tags: [authentication, clickhouse]
-author: 0x4D31
+author: "0x4D31"
 ttps:
   - framework: MITRE ATT&CK
     tactic: Credential Access
