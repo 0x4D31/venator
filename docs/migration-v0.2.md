@@ -28,27 +28,65 @@ querying; use `--force` for an intentional ad-hoc run.
 
 - Parsing is strict and validates enums, mappings, duplicate publishers, role
   configuration, durations, URLs, and ClickHouse table identifiers.
-- `${VARIABLE}` references are expanded after YAML decoding and only when a
-  rule selects that connector. A missing selected secret fails clearly without
-  forcing unrelated credentials into every job.
+- Connector instance keys now accept only ASCII letters, digits, hyphens, and
+  underscores; dots remain the `<connector>.<instance>` separator.
+- String values in connector instances and the global `llm` block may contain
+  braced `${VARIABLE}` references. Expansion happens after YAML decoding and
+  only when a rule selects that connector or reviewer. Instance keys, typed
+  non-string fields, and rule fields are not interpolated; bare `$VARIABLE`
+  remains literal.
 - `runtime.maxBytes` defaults to 64 MiB alongside `runtime.maxRecords`; tune
   both for the scheduler memory limit and expected result shape.
 - `exclusionsPath` may be relative to the rule file for local deployments. Helm
-  continues to support `/app/exclusion/<file>.yaml` and mounts only rules that
-  reference an exclusion file.
-- `bestEffortPublishers` is optional. Existing `publishers` remain required.
+  requires exactly `/app/exclusion/<file>.yaml`, where the file is packaged
+  directly under `config/exclusions/`, and mounts it only for rules that
+  reference it.
+- `publishers` retains required-delivery semantics; `bestEffortPublishers` is
+  optional. At least one sink across the two lists is required.
+
+See the [rule and exclusion reference](rule-reference.md) for the complete
+v0.2.0 syntax and operator semantics.
+
+### OpenSearch sink index (breaking)
+
+v0.1 hardcoded OpenSearch findings to the `signals` index. The v0.2.0 default is
+`venator-findings-v1`, and the index is now configurable per OpenSearch instance
+with `index`. Before upgrading, either install the supplied
+[`venator-findings-v1` template](../connector/opensearch/index-template.json)
+and migrate or intentionally start the new index, or set `index: signals` to
+retain the old destination. Do not let a production upgrade silently split
+findings across both names. Installation and pagination guidance is in the
+[OpenSearch connector README](../connector/opensearch/README.md).
+
+OpenSearch SQL pagination is now explicit. The default `sqlFetchSize: 0` keeps
+aggregation and join rules compatible. Set a positive `sqlFetchSize` only on
+connector instances used by basic SQL queries that need cursor pagination.
+OpenSearch's `total` counts matching documents rather than promised output rows,
+so Venator no longer rejects legitimate `LIMIT` or aggregation results when
+`total` and `size` differ. Give nonpaged SQL and PPL rules explicit query bounds.
 
 ## Finding output
 
 All publishers now receive a `venator.finding/v1` envelope rather than a mix of
 raw maps and independently built signals. Update downstream schemas and parsers
 for `id`, `run_id`, `detected_at`, `source`, `rule`, `attributes`, and `payload`.
-The signal payload corrects `confidenceid` to `confidence_id` and preserves TTP
-references and typed rule-specific data.
+`attributes` is omitted for raw findings without normalized signal fields. The
+signal payload corrects `confidenceid` to `confidence_id`, omits an unmapped
+timestamp, and preserves TTP references and typed rule-specific data. Signal
+mode is a projection: source fields that are not explicitly mapped are not
+retained in its payload. Use raw mode when the complete source record is part
+of the required evidence.
 
 OpenSearch writes by stable finding ID. ClickHouse and BigQuery use documented
 canonical finding schemas. Pub/Sub message attributes include schema, finding,
-run, and rule IDs. Slack renders the same canonical JSON.
+run, and rule IDs. Slack now renders a bounded human-readable summary and is not
+a lossless archive; send canonical findings to an archival sink when retention
+is required.
+
+Slack uses `plain_text` Block Kit sections with bounded fields and a truncated
+message or payload preview. `maxFindings` defaults to 20 and cannot exceed
+Slack's 50-block ceiling. A batch above the configured limit is rejected; when
+Slack is a required publisher, that rejection makes the run fail.
 
 Create or migrate the BigQuery destination with
 [`connector/bigquery/schema.sql`](../connector/bigquery/schema.sql). BigQuery
@@ -76,22 +114,27 @@ llm:
 LLM review is an explicit external egress boundary: without `evidenceFields`,
 the complete finding payload is sent to the configured provider. Use the
 top-level allowlist and redaction controls for logs containing credentials or
-personal data. A required review must cover every finding; if `maxFindings`
-truncates the batch, deterministic findings are still published and the run
-then exits non-zero.
+personal data. `maxFindings: 0` uses the default of 50. A required review must
+cover every finding; if `maxFindings` truncates the batch, deterministic
+findings are still published and the run then exits non-zero.
 
 ## Helm
 
 The chart remains in `config/` and still creates one CronJob per enabled rule.
-Run `helm template` against production rules before upgrade. Review the new
-defaults for `concurrencyPolicy: Forbid`, deadlines, backoff/history, non-root
-execution, read-only root filesystem, and optional Secret references. Override
-security settings only when a connector or sidecar genuinely requires it.
+It requires Kubernetes 1.27 or newer because every CronJob sets `spec.timeZone`.
+Run `helm template` against production rules before upgrade. The binary treats
+`schedule` as opaque deployment metadata; Helm requires it for enabled rules
+and Kubernetes validates its CronJob syntax. Review the new defaults for
+`concurrencyPolicy: Forbid`, deadlines, backoff/history, non-root execution,
+read-only root filesystem, and optional Secret references. Override security
+settings only when a connector or sidecar genuinely requires it.
 
-The shipped smoke rules are disabled, so installing the chart cannot create a
+The shipped smoke rule is disabled, so installing the chart cannot create a
 green empty-stdin CronJob by accident. Enable real rules in your rule tree.
 Completed Jobs have no TTL by default and remain subject to configurable
-CronJob history limits. `replicaCount`, `nameOverride`, and `fullnameOverride`
-remain accepted for old values files (CronJobs do not consume them). New
-`serviceAccount`, `ruleServiceAccounts`, `ruleSecretEnv`, and `ruleEnvFrom`
-controls support GKE Workload Identity and per-rule credential isolation.
+CronJob history limits. Remove the old no-op `replicaCount`, `nameOverride`,
+and `fullnameOverride` keys from values files; the strict chart schema now
+rejects them. `secretEnv` now defaults to an empty list instead of an optional
+OpenSearch-password reference. Configure shared credentials explicitly, or use
+`ruleSecretEnv` and `ruleEnvFrom` for per-rule isolation. New `serviceAccount`
+and `ruleServiceAccounts` controls support GKE Workload Identity.

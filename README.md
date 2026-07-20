@@ -5,14 +5,28 @@
 # Venator
 
 Venator is a scheduler-neutral batch detection engine. One invocation runs one
-versioned rule, turns typed query results into stable findings, delivers the
-same canonical envelope to every configured sink, and exits with an honest
-status code.
+versioned rule, turns typed query results into one canonical finding model,
+hands those findings to the configured sinks, and exits with an honest status
+code. Archival sinks retain the envelope; human-notification sinks may render a
+bounded projection.
 
 It is intentionally not a SIEM, log shipper, or required Kubernetes service.
 Run it from a laptop, an AI-agent tool, launchd, systemd, Nomad, Docker, or a
 Kubernetes CronJob. The original design motivation is described in
 [Open-sourcing Venator](https://detect.fyi/open-sourcing-venator-b94374e30a55).
+
+## Why Venator
+
+Venator gives each detection a strict, versioned, one-shot execution contract:
+typed input, exclusions, stable finding identity, explicit delivery semantics,
+and a truthful exit status. When each rule is scheduled as its own job, the
+scheduler also gives it independent logs, history, retries, and manual reruns.
+The first-class Helm workflow preserves that rule-per-CronJob model for direct
+operation and debugging in GKE and other Kubernetes control planes.
+
+v0.2.0 keeps that operational model and makes the same runner useful outside
+Kubernetes. A local agent, laptop scheduler, systemd timer, Nomad job, or other
+automation can invoke one rule and act on the same output and exit status.
 
 ## v0.2.0 architecture
 
@@ -36,8 +50,9 @@ Every finding includes:
 - a stable SHA-256 ID derived from the rule UID and source evidence;
 - a per-execution run ID and timestamps;
 - rule, source, confidence, tag, and ATT&CK metadata;
-- commonly queried signal attributes; and
-- the lossless raw or normalized payload.
+- commonly queried signal attributes when mapped; and
+- a payload containing the complete typed source record in raw mode, or only
+  the selected normalized fields in signal mode.
 
 ## Quick start without a SIEM
 
@@ -72,13 +87,13 @@ canonical output before sink fan-out.
 
 | Connector | Source | Sink | Notes |
 | --- | ---: | ---: | --- |
-| stdin/stdout NDJSON | yes | yes | Built in; ideal for Tenzir, agents, and pipelines |
-| finite NDJSON file | yes | no | `file.ndjson`; rule-relative path, no hidden checkpoint state |
-| ClickHouse | yes | yes | Official Go driver, native/HTTP, typed rows, bounded queries, batch writes |
-| OpenSearch | yes | yes | Context-aware SQL query and idempotent bulk finding writes |
-| BigQuery | yes | yes | Typed query values; sink role requires dataset and table |
-| Pub/Sub | no | yes | Canonical finding messages with serialization and publish failures surfaced |
-| Slack | no | yes | Context-aware webhook delivery of canonical findings |
+| [stdin/stdout NDJSON](connector/stdio/) | yes | yes | Built in; ideal for Tenzir, agents, and pipelines |
+| [finite NDJSON file](connector/stdio/) | yes | no | `file.ndjson`; rule-relative path, no hidden checkpoint state |
+| [ClickHouse](connector/clickhouse/) | yes | yes | Official Go driver, native/HTTP, typed rows, bounded queries, batch writes |
+| [OpenSearch](connector/opensearch/) | yes | yes | Bounded SQL/PPL queries and idempotent bulk finding writes |
+| [BigQuery](connector/bigquery/) | yes | yes | Typed query values; sink role requires dataset and table |
+| [Pub/Sub](connector/pubsub/) | no | yes | Canonical finding messages with serialization and publish failures surfaced |
+| [Slack](connector/slack/) | no | yes | Bounded human-readable notifications; intentionally lossy |
 
 ClickHouse configuration and a home-lab Compose stack are in
 [`connector/clickhouse/`](connector/clickhouse/) and
@@ -106,17 +121,21 @@ output:
   fields: []
 ```
 
-`publishers` are required: any failure makes the run fail after all required
-sinks have been attempted. `bestEffortPublishers` are attempted and recorded
-but do not fail an otherwise completed run. Exclusion paths can be relative to
-the rule file, making the same rule portable across hosts and containers.
+Entries in `publishers` are required-delivery sinks: any failure makes the run
+fail after all required sinks have been attempted. `bestEffortPublishers` are
+attempted and recorded but do not fail an otherwise completed run. At least one
+sink across the two lists is required. Exclusion paths can be relative to the
+rule file outside Helm; chart-managed rules use packaged exclusion paths.
 
 Configuration parsing is strict. Unknown keys, invalid enums, duplicate sinks,
 unsafe ClickHouse identifiers, and incomplete connector configurations are
 rejected. An active run preflights its source and required sinks before issuing
 the query; `venator validate` also checks best-effort sinks. Expansion happens
 after YAML decoding, so secret characters cannot alter the configuration
-structure.
+structure. String values in connector instances and the global `llm` block
+expand braced `${NAME}` references; instance keys, typed non-string fields, and
+rule files are not interpolated. See the authoritative
+[rule and exclusion reference](docs/rule-reference.md).
 
 ## AI review
 
@@ -132,7 +151,8 @@ own timeout and reserves time for deterministic publishers.
 
 AI review is best effort by default. Set `llm.required: true` only when a
 missing annotation should make the process return non-zero after deterministic
-findings have still been delivered.
+findings have still been delivered. A concise local rule is available in
+[`config/examples/llm-review-rule.yaml`](config/examples/llm-review-rule.yaml).
 
 ## Deployment
 

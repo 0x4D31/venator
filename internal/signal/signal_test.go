@@ -1,6 +1,7 @@
 package signal_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,6 @@ func TestBuildSignal(t *testing.T) {
 			},
 		},
 	}
-	// config with unsupported output field
 	cfgInvalidOutput := &config.RuleConfig{
 		Name: "test-rule",
 		UID:  "test-uid",
@@ -65,7 +65,7 @@ func TestBuildSignal(t *testing.T) {
 				Timestamp: time.Date(2023, 5, 14, 10, 0, 0, 0, time.UTC),
 				RuleID:    cfg.UID,
 				RuleName:  cfg.Name,
-				TTPs:      []map[string]string{},
+				TTPs:      []signal.TTP{},
 				Message:   "process xyz created/modified the file abc",
 				Resource:  signal.Resource{Name: "hostname123", Type: "", UID: ""},
 				Actor: signal.Actor{
@@ -96,7 +96,7 @@ func TestBuildSignal(t *testing.T) {
 				Timestamp: time.Date(2023, 5, 14, 10, 0, 0, 0, time.UTC),
 				RuleID:    cfg.UID,
 				RuleName:  cfg.Name,
-				TTPs:      []map[string]string{},
+				TTPs:      []signal.TTP{},
 				Message:   "process xyz created/modified the file abc",
 				Resource:  signal.Resource{Name: "hostname123", Type: "", UID: ""},
 				Actor: signal.Actor{
@@ -193,6 +193,34 @@ func TestBuildSignalAllowsOneSourceForMultipleFieldsAndTypedTime(t *testing.T) {
 	}
 }
 
+func TestBuildSignalMapsTTPs(t *testing.T) {
+	cfg := &config.RuleConfig{
+		Name: "test",
+		UID:  "id",
+		TTPs: []config.TTP{{
+			Framework: "MITRE ATT&CK",
+			Tactic:    "credential-access",
+			Name:      "Credentials from Password Stores",
+			ID:        "T1555",
+			Reference: "https://attack.mitre.org/techniques/T1555/",
+		}},
+	}
+	got, err := signal.BuildSignal(model.Record{}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []signal.TTP{{
+		Framework: "MITRE ATT&CK",
+		Tactic:    "credential-access",
+		Name:      "Credentials from Password Stores",
+		ID:        "T1555",
+		Reference: "https://attack.mitre.org/techniques/T1555/",
+	}}
+	if diff := cmp.Diff(want, got.TTPs); diff != "" {
+		t.Fatalf("unexpected TTPs (-want +got):\n%s", diff)
+	}
+}
+
 func TestBuildSignalPreservesTypedRuleSpecificScalar(t *testing.T) {
 	cfg := &config.RuleConfig{Name: "test", UID: "id", Output: config.Output{Fields: []config.OutputField{
 		{Field: "RuleSpecificData", Source: "failures"},
@@ -203,5 +231,28 @@ func TestBuildSignalPreservesTypedRuleSpecificScalar(t *testing.T) {
 	}
 	if value, ok := got.RuleSpecificData["raw"].(int64); !ok || value != 12 {
 		t.Fatalf("rule-specific data = %#v", got.RuleSpecificData)
+	}
+}
+
+func TestBuildSignalAcceptsTypedJSONObject(t *testing.T) {
+	cfg := &config.RuleConfig{Name: "test", UID: "id", Output: config.Output{Fields: []config.OutputField{
+		{Field: "RuleSpecificData", Source: "details"},
+	}}}
+	got, err := signal.BuildSignal(model.Record{"details": map[string]string{"state": "blocked"}}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RuleSpecificData["state"] != "blocked" {
+		t.Fatalf("rule-specific data = %#v", got.RuleSpecificData)
+	}
+}
+
+func TestSignalOmitsUnmappedTimestamp(t *testing.T) {
+	encoded, err := json.Marshal(signal.Signal{RuleID: "rule-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"timestamp"`) {
+		t.Fatalf("zero timestamp was serialized: %s", encoded)
 	}
 }

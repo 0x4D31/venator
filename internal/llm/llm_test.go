@@ -7,17 +7,19 @@ import (
 	"testing"
 
 	"github.com/0x4D31/venator/internal/config"
-	llmmodel "github.com/0x4D31/venator/internal/llm/model"
+	"github.com/0x4D31/venator/internal/llm/provider"
 	"github.com/0x4D31/venator/internal/model"
 )
 
 type mockClient struct {
-	request  llmmodel.Request
+	request  provider.Request
 	response string
 	err      error
+	calls    int
 }
 
-func (m *mockClient) Call(_ context.Context, request llmmodel.Request) (string, error) {
+func (m *mockClient) Call(_ context.Context, request provider.Request) (string, error) {
+	m.calls++
 	m.request = request
 	return m.response, m.err
 }
@@ -75,6 +77,20 @@ func TestReviewProjectsAndRedactsEvidenceFields(t *testing.T) {
 	}
 	if strings.Contains(client.request.User, "secret") || strings.Contains(client.request.User, "laptop") || !strings.Contains(client.request.User, "[REDACTED]") {
 		t.Fatalf("user prompt = %q", client.request.User)
+	}
+}
+
+func TestReviewRejectsMissingRedactionFieldBeforeCallingModel(t *testing.T) {
+	client := &mockClient{response: `{"decisions":[]}`}
+	findings := []model.Finding{{ID: "f-1", Payload: model.Record{"token": "secret"}}}
+	_, err := Review(context.Background(), client, findings, &config.RuleConfig{LLM: &config.LLM{
+		Prompt: "review", RedactFields: []string{"access_token"},
+	}}, "test/model")
+	if err == nil || !strings.Contains(err.Error(), `redaction field "access_token" is missing`) {
+		t.Fatalf("error = %v", err)
+	}
+	if client.calls != 0 {
+		t.Fatalf("model calls = %d", client.calls)
 	}
 }
 

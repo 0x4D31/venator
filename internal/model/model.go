@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 )
 
@@ -27,8 +28,8 @@ type RuleMetadata struct {
 	TTPIDs     []string `json:"ttp_ids,omitempty"`
 }
 
-// FindingAttributes contains commonly queried fields. Payload remains the
-// lossless source of truth, while sinks such as ClickHouse can index these.
+// FindingAttributes contains commonly queried fields. Payload holds either the
+// complete raw record or the rule's normalized signal projection.
 type FindingAttributes struct {
 	ActorUserName string `json:"actor_user_name,omitempty"`
 	ActorUserUID  string `json:"actor_user_uid,omitempty"`
@@ -63,7 +64,7 @@ type Finding struct {
 	Source        string            `json:"source"`
 	OutputFormat  string            `json:"output_format"`
 	Rule          RuleMetadata      `json:"rule"`
-	Attributes    FindingAttributes `json:"attributes,omitempty"`
+	Attributes    FindingAttributes `json:"attributes,omitzero"`
 	Payload       any               `json:"payload"`
 	Review        *Review           `json:"review,omitempty"`
 }
@@ -142,6 +143,13 @@ func StringValue(value any) (string, bool) {
 	if value == nil {
 		return "", true
 	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		if reflected.IsNil() {
+			return "", true
+		}
+	}
 	switch v := value.(type) {
 	case string:
 		return v, true
@@ -158,6 +166,10 @@ func StringValue(value any) (string, bool) {
 		return v.String(), true
 	}
 	if encoded, err := json.Marshal(value); err == nil {
+		var text string
+		if err := json.Unmarshal(encoded, &text); err == nil {
+			return text, true
+		}
 		return string(encoded), true
 	}
 	return "", false

@@ -24,3 +24,19 @@ cross-partition deduplication semantics.
 TLS verifies certificates by default. `caFile` adds a private CA to the system
 trust roots; `certFile` and `keyFile` enable mutual TLS. Keep
 `insecureSkipVerify` for isolated development clusters only.
+
+The native and HTTP source/sink paths share an opt-in live acceptance test.
+Start the home-lab stack, then run:
+
+```sh
+export CLICKHOUSE_PASSWORD='local-test-password'
+docker compose -f deploy/clickhouse/compose.yaml up -d --wait clickhouse
+VENATOR_CLICKHOUSE_INTEGRATION=1 \
+VENATOR_CLICKHOUSE_PASSWORD="$CLICKHOUSE_PASSWORD" \
+go test -count=1 -run '^TestLiveNativeAndHTTP$' ./connector/clickhouse
+```
+
+Override `VENATOR_CLICKHOUSE_NATIVE_ADDRESS`,
+`VENATOR_CLICKHOUSE_HTTP_ADDRESS`, or `VENATOR_CLICKHOUSE_USERNAME` when the
+server is not the bundled Compose service. The normal unit suite never dials a
+server.

@@ -43,10 +43,9 @@ The included NDJSON fixture has exactly the destination columns `event_id`,
 `timestamp`, `username`, `source_ip`, and `outcome`; the pipeline casts the RFC
 3339 string to Tenzir's time type before appending. Adapt that normalization
 boundary when your source uses names such as `user` or `event`. Every real
-collector must provide a stable, source-unique `event_id`. This example requires Tenzir
-Node 6.6 or newer because the table uses `DateTime64(6, 'UTC')` and
-`LowCardinality(String)`; 6.6 introduced append support for existing columns
-of those types. Other schemas may work with earlier releases.
+collector must provide a stable, source-unique `event_id`. The pipeline uses
+Tenzir's current `from_file` and `to_clickhouse` syntax and appends to the
+pre-created ClickHouse table rather than asking Tenzir to infer its schema.
 
 `watch=10s` discovers newly appearing `*.ndjson` spool or rotated files. It is
 not an offset-checkpointed tail of one continuously growing file, and restarting
@@ -67,11 +66,9 @@ venator run \
   --rule-config config/examples/clickhouse-rule.yaml
 ```
 
-Tenzir's current `from_clickhouse` maps scalar, nullable, UUID, DateTime64, and
-array types but not ClickHouse `Map`. Venator therefore stores indexed scalars
-and arrays plus the complete canonical envelope in a compressed `String`
-payload. See the official [Tenzir ClickHouse operator](https://tenzir.com/docs/reference/operators/to_clickhouse/)
-and [Tenzir releases](https://github.com/tenzir/tenzir/releases).
+See the official [Tenzir ClickHouse integration](https://docs.tenzir.com/integrations/clickhouse/)
+and [`from_file` reference](https://docs.tenzir.com/reference/operators/from_file/)
+when adapting the sample to another Tenzir release or schema.
 
 The included pipeline assumes Tenzir runs on the same host as the loopback-only
 ClickHouse Compose stack and authenticates as its `venator` evaluation user.

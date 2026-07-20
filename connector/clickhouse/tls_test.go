@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -100,5 +101,35 @@ func TestBuildTLSConfigRejectsIgnoredOrInvalidMaterial(t *testing.T) {
 				t.Fatalf("buildTLSConfig() error = %v, want containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestBuildTLSConfigRejectsFIFOWithoutOpeningIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ca.pipe")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildTLSConfig(config.ClickHouseTLSConfig{Enabled: true, CAFile: path})
+	if err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestReadTLSFileAllowsSymlinkToRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(target, []byte("certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "mounted-ca.pem")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := readTLSFile("CA", link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "certificate" {
+		t.Fatalf("contents = %q", contents)
 	}
 }

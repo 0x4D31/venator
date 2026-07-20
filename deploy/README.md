@@ -23,10 +23,11 @@ Every deployment supplies two read-only YAML files:
 - a global connector configuration, passed with `--global-config`; and
 - one rule configuration, passed with `--rule-config`.
 
-Store credentials outside those files where possible. Selected connectors
-expand `${VARIABLE}` references lazily after YAML decoding, so systemd environment files,
-Nomad/Vault templates, Kubernetes Secrets, and the invoking agent's environment
-can all inject credentials without changing a rule.
+Store credentials outside those files where possible. String values in selected
+connector instances and the global reviewer expand `${VARIABLE}` references
+lazily after YAML decoding, so systemd environment files, Nomad/Vault
+templates, Kubernetes Secrets, and the invoking agent's environment can inject
+credentials without changing a rule.
 
 The normal invocation is:
 

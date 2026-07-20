@@ -3,17 +3,88 @@
 {{- if or (not (kindIs "string" $cfg.name)) (gt (len $cfg.name) 52) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $cfg.name)) }}
 {{- fail (printf "rule in %s has name %q; Helm rule names must be DNS-1123 labels of at most 52 characters" $path $cfg.name) }}
 {{- end }}
-{{- if eq $cfg.enabled true }}
+{{- if and (hasKey $cfg "enabled") (not (kindIs "bool" $cfg.enabled)) }}
+{{- fail (printf "rule %s enabled must be a boolean" $cfg.name) }}
+{{- end }}
+{{- if and (hasKey $cfg "schedule") (not (kindIs "string" $cfg.schedule)) }}
+{{- fail (printf "rule %s schedule must be a string" $cfg.name) }}
+{{- end }}
+{{- if and (hasKey $cfg "exclusionsPath") (not (kindIs "string" $cfg.exclusionsPath)) }}
+{{- fail (printf "rule %s exclusionsPath must be a string" $cfg.name) }}
+{{- end }}
 {{- $exclusionPath := default "" $cfg.exclusionsPath }}
+{{- if $exclusionPath }}
+{{- if not (regexMatch "^/app/exclusion/[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.yaml$" $exclusionPath) }}
+{{- fail (printf "rule %s exclusionsPath must be exactly /app/exclusion/<packaged-name>.yaml" $cfg.name) }}
+{{- end }}
+{{- $packagedExclusion := printf "exclusions/%s" ($exclusionPath | base) }}
+{{- if eq (len ($.Files.Glob $packagedExclusion)) 0 }}
+{{- fail (printf "rule %s exclusionsPath %q does not match packaged file %s" $cfg.name $exclusionPath $packagedExclusion) }}
+{{- end }}
+{{- end }}
 {{- $exclusionName := $exclusionPath | base | trimSuffix ".yaml" }}
 {{- $ruleSecretEnv := default (list) (get $.Values.ruleSecretEnv $cfg.name) }}
 {{- $allSecretEnv := concat $.Values.secretEnv $ruleSecretEnv }}
+{{- $envNames := dict }}
+{{- range $env := $allSecretEnv }}
+{{- $envName := required (printf "rule %s secret environment entry requires name" $cfg.name) $env.name }}
+{{- if hasKey $envNames $envName }}
+{{- fail (printf "rule %s defines environment variable %q more than once" $cfg.name $envName) }}
+{{- end }}
+{{- $_ := set $envNames $envName true }}
+{{- end }}
+{{- range $env := $.Values.extraEnv }}
+{{- $envName := required (printf "rule %s extra environment entry requires name" $cfg.name) $env.name }}
+{{- if hasKey $envNames $envName }}
+{{- fail (printf "rule %s defines environment variable %q more than once" $cfg.name $envName) }}
+{{- end }}
+{{- $_ := set $envNames $envName true }}
+{{- end }}
 {{- $ruleEnvFrom := default (list) (get $.Values.ruleEnvFrom $cfg.name) }}
 {{- $allEnvFrom := concat $.Values.envFrom $ruleEnvFrom }}
 {{- $ruleExtraVolumes := default (list) (get $.Values.ruleExtraVolumes $cfg.name) }}
 {{- $allExtraVolumes := concat $.Values.extraVolumes $ruleExtraVolumes }}
 {{- $ruleExtraVolumeMounts := default (list) (get $.Values.ruleExtraVolumeMounts $cfg.name) }}
 {{- $allExtraVolumeMounts := concat $.Values.extraVolumeMounts $ruleExtraVolumeMounts }}
+{{- $reservedVolumeNames := list "rule-volume" "config-volume" "exclusion-volume" "tmp" }}
+{{- $volumeNames := dict }}
+{{- range $volume := $allExtraVolumes }}
+{{- $volumeName := required (printf "rule %s extra volume requires name" $cfg.name) $volume.name }}
+{{- if has $volumeName $reservedVolumeNames }}
+{{- fail (printf "rule %s extra volume name %q is reserved" $cfg.name $volumeName) }}
+{{- end }}
+{{- if hasKey $volumeNames $volumeName }}
+{{- fail (printf "rule %s defines extra volume name %q more than once" $cfg.name $volumeName) }}
+{{- end }}
+{{- $_ := set $volumeNames $volumeName true }}
+{{- end }}
+{{- $mountPaths := dict }}
+{{- $reservedAppMountPaths := list "/app/rule" "/app/config" "/app/exclusion" }}
+{{- range $mount := $allExtraVolumeMounts }}
+{{- $mountName := required (printf "rule %s extra volume mount requires name" $cfg.name) $mount.name }}
+{{- $mountPath := required (printf "rule %s extra volume mount %q requires mountPath" $cfg.name $mountName) $mount.mountPath }}
+{{- $cleanMountPath := clean $mountPath }}
+{{- $mountPathPrefix := printf "%s/" (trimSuffix "/" $cleanMountPath) }}
+{{- if has $mountName $reservedVolumeNames }}
+{{- fail (printf "rule %s extra volume mount name %q is reserved" $cfg.name $mountName) }}
+{{- end }}
+{{- if not (hasKey $volumeNames $mountName) }}
+{{- fail (printf "rule %s extra volume mount %q has no matching extra volume" $cfg.name $mountName) }}
+{{- end }}
+{{- range $reservedPath := $reservedAppMountPaths }}
+{{- if or (eq $cleanMountPath $reservedPath) (hasPrefix (printf "%s/" $reservedPath) $cleanMountPath) (hasPrefix $mountPathPrefix (printf "%s/" $reservedPath)) }}
+{{- fail (printf "rule %s extra volume mountPath %q overlaps reserved path %s" $cfg.name $mountPath $reservedPath) }}
+{{- end }}
+{{- end }}
+{{- if or (eq $cleanMountPath "/tmp") (hasPrefix $mountPathPrefix "/tmp/") }}
+{{- fail (printf "rule %s extra volume mountPath %q replaces /tmp or one of its ancestors" $cfg.name $mountPath) }}
+{{- end }}
+{{- if hasKey $mountPaths $cleanMountPath }}
+{{- fail (printf "rule %s defines extra volume mountPath %q more than once" $cfg.name $mountPath) }}
+{{- end }}
+{{- $_ := set $mountPaths $cleanMountPath true }}
+{{- end }}
+{{- if eq $cfg.enabled true }}
 {{- $defaultServiceAccount := $.Values.serviceAccount.name }}
 {{- if and $.Values.serviceAccount.create (not $defaultServiceAccount) }}
 {{- $defaultServiceAccount = printf "%s-venator" $.Release.Name }}

@@ -2,11 +2,12 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // RuleConfig represents the entire config structure for a single rule.
@@ -78,14 +79,29 @@ const (
 // ParseRuleConfig parses the rules YAML configuration file.
 func ParseRuleConfig(path string) (*RuleConfig, error) {
 	var cfg RuleConfig
-	file, err := os.Open(path)
+	file, err := openRegularConfigFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open config file: %w", err)
 	}
 	defer file.Close()
 
+	var document yaml.Node
+	shapeDecoder := yaml.NewDecoder(file)
+	if err := shapeDecoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("failed to decode config YAML: %w", err)
+	}
+	if err := requireYAMLEOF(shapeDecoder); err != nil {
+		return nil, fmt.Errorf("failed to decode config YAML: %w", err)
+	}
+	if err := validateRuleScalarTypes(&document); err != nil {
+		return nil, fmt.Errorf("failed to decode config YAML: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("failed to rewind config file: %w", err)
+	}
+
 	decoder := yaml.NewDecoder(file)
-	decoder.KnownFields(true) // Enforce strict field matching
+	decoder.KnownFields(true)
 
 	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to decode config YAML: %w", err)
@@ -101,6 +117,76 @@ func ParseRuleConfig(path string) (*RuleConfig, error) {
 	}
 
 	return &cfg, nil
+}
+
+func validateRuleScalarTypes(document *yaml.Node) error {
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		return nil
+	}
+	root, err := resolveRuleAlias(document.Content[0])
+	if err != nil {
+		return err
+	}
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i < len(root.Content); i += 2 {
+		key := root.Content[i]
+		value, err := resolveRuleAlias(root.Content[i+1])
+		if err != nil {
+			return err
+		}
+		switch key.Value {
+		case "enabled":
+			if value.Kind != yaml.ScalarNode || value.Tag != "!!bool" {
+				return fmt.Errorf("enabled must be a YAML boolean")
+			}
+		case "schedule":
+			if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+				return fmt.Errorf("schedule must be a YAML string")
+			}
+		}
+	}
+	return nil
+}
+
+func resolveRuleAlias(node *yaml.Node) (*yaml.Node, error) {
+	seen := map[*yaml.Node]struct{}{}
+	for node != nil && node.Kind == yaml.AliasNode {
+		if _, duplicate := seen[node]; duplicate {
+			return nil, fmt.Errorf("recursive YAML alias")
+		}
+		seen[node] = struct{}{}
+		node = node.Alias
+	}
+	if node == nil {
+		return nil, fmt.Errorf("invalid YAML alias")
+	}
+	return node, nil
+}
+
+func openRegularConfigFile(path string) (*os.File, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%q is not a regular file", path)
+	}
+	file, err := os.Open(path) // #nosec G304 -- the CLI explicitly selects this configuration file.
+	if err != nil {
+		return nil, err
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("%q changed and is no longer a regular file", path)
+	}
+	return file, nil
 }
 
 func (c *RuleConfig) Validate() error {
@@ -123,6 +209,9 @@ func (c *RuleConfig) Validate() error {
 	}
 	if strings.TrimSpace(c.Language) == "" {
 		return fmt.Errorf("language is required")
+	}
+	if err := validateSourceLanguage(c.QueryEngine, c.Language, c.Query); err != nil {
+		return err
 	}
 	if len(c.Publishers)+len(c.BestEffortPublishers) == 0 {
 		return fmt.Errorf("at least one publisher is required")
@@ -183,6 +272,43 @@ func (c *RuleConfig) Validate() error {
 				}
 				seenFields[field] = struct{}{}
 			}
+		}
+		if len(c.LLM.EvidenceFields) > 0 {
+			evidenceFields := make(map[string]struct{}, len(c.LLM.EvidenceFields))
+			for _, field := range c.LLM.EvidenceFields {
+				evidenceFields[field] = struct{}{}
+			}
+			for _, field := range c.LLM.RedactFields {
+				if _, included := evidenceFields[field]; !included {
+					return fmt.Errorf("llm.redactFields field %q must also appear in llm.evidenceFields", field)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateSourceLanguage(queryEngine, language, query string) error {
+	language = strings.ToUpper(strings.TrimSpace(language))
+	switch {
+	case queryEngine == "stdin.default":
+		if language != "NDJSON" {
+			return fmt.Errorf("queryEngine %q requires language NDJSON", queryEngine)
+		}
+		if strings.TrimSpace(query) != "" {
+			return fmt.Errorf("query must be empty for queryEngine %q", queryEngine)
+		}
+	case queryEngine == "file.ndjson":
+		if language != "NDJSON" {
+			return fmt.Errorf("queryEngine %q requires language NDJSON", queryEngine)
+		}
+	case strings.HasPrefix(queryEngine, "bigquery."), strings.HasPrefix(queryEngine, "clickhouse."):
+		if language != "SQL" {
+			return fmt.Errorf("queryEngine %q requires language SQL", queryEngine)
+		}
+	case strings.HasPrefix(queryEngine, "opensearch."):
+		if language != "SQL" && language != "PPL" {
+			return fmt.Errorf("queryEngine %q requires language SQL or PPL", queryEngine)
 		}
 	}
 	return nil

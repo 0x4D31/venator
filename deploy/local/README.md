@@ -3,7 +3,24 @@
 Local execution is the smallest Venator deployment and is a useful default for
 workstations, home labs, and agent-driven workflows.
 
-## Build and install
+## Install a release binary
+
+Download the asset for the host from the v0.2.0 GitHub release, verify it
+against `SHA256SUMS`, and install it in a user-owned binary directory. For
+example, on Apple Silicon:
+
+```sh
+curl -fLO https://github.com/0x4D31/venator/releases/download/v0.2.0/venator-darwin-arm64
+curl -fLO https://github.com/0x4D31/venator/releases/download/v0.2.0/SHA256SUMS
+grep ' venator-darwin-arm64$' SHA256SUMS | shasum -a 256 -c -
+install -d -m 0755 "$HOME/.local/bin"
+install -m 0755 venator-darwin-arm64 "$HOME/.local/bin/venator"
+```
+
+Release assets are available for Linux and macOS on amd64 and arm64. Replace
+the asset name above for the host; Linux users can use `sha256sum -c`.
+
+## Build from source
 
 Venator v0.2.0 requires Go 1.25.12 or newer.
 

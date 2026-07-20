@@ -90,11 +90,7 @@ func (s *Source) Query(ctx context.Context, ruleConfig *config.RuleConfig) (reco
 		return nil, err
 	}
 
-	capacity := 256
-	if s.maxRows < uint64(capacity) {
-		capacity = int(s.maxRows)
-	}
-	records = make([]model.Record, 0, capacity)
+	records = make([]model.Record, 0, 256)
 	var totalBytes uint64
 	for rows.Next() {
 		if uint64(len(records)) >= s.maxRows {
@@ -170,14 +166,24 @@ func scannedValue(target any) any {
 		if value.IsNil() {
 			return nil
 		}
-		candidate := value.Interface()
-		if _, ok := candidate.(json.Marshaler); ok {
-			return candidate
+		pointedTo := value.Elem()
+		if pointedTo.CanInterface() {
+			candidate := pointedTo.Interface()
+			if _, ok := candidate.(json.Marshaler); ok {
+				return candidate
+			}
+			if _, ok := candidate.(encoding.TextMarshaler); ok {
+				return candidate
+			}
 		}
-		if _, ok := candidate.(encoding.TextMarshaler); ok {
-			return candidate
+		pointer := value.Interface()
+		if _, ok := pointer.(json.Marshaler); ok {
+			return pointer
 		}
-		value = value.Elem()
+		if _, ok := pointer.(encoding.TextMarshaler); ok {
+			return pointer
+		}
+		value = pointedTo
 	}
 	result := value.Interface()
 	if bytes, ok := result.([]byte); ok {

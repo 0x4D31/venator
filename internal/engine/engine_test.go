@@ -33,6 +33,15 @@ func (blockingSink) Publish(ctx context.Context, _ model.PublishBatch) error {
 	return ctx.Err()
 }
 
+type cancelingSource struct {
+	cancel context.CancelFunc
+}
+
+func (s cancelingSource) Query(context.Context, *config.RuleConfig) ([]model.Record, error) {
+	s.cancel()
+	return []model.Record{{"x": 1}}, nil
+}
+
 func (s fakeSink) Publish(_ context.Context, batch model.PublishBatch) error {
 	*s.batches = append(*s.batches, batch)
 	return s.err
@@ -130,6 +139,34 @@ func TestRequiredSinksFanOutWithoutDeadlineStarvation(t *testing.T) {
 	}
 }
 
+func TestRunFailsWhenBestEffortSinkExhaustsContext(t *testing.T) {
+	var healthy []model.PublishBatch
+	rule := testRule()
+	rule.BestEffortPublishers = []string{"blocked"}
+	registry := fakeRegistry{
+		sources: map[string]connector.QueryRunner{"fake": fakeSource{records: []model.Record{{"x": 1}}}},
+		sinks: map[string]connector.Publisher{
+			"required": fakeSink{batches: &healthy},
+			"blocked":  blockingSink{},
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	report, err := Run(ctx, registry, rule, Options{Now: fixedClock()})
+	if !errors.Is(err, context.DeadlineExceeded) || report.Status != "failed" || len(healthy) != 1 {
+		t.Fatalf("report/healthy/error = %#v %#v %v", report, healthy, err)
+	}
+}
+
+func TestRunFailsWhenSourceReturnsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	registry := fakeRegistry{sources: map[string]connector.QueryRunner{"fake": cancelingSource{cancel: cancel}}}
+	report, err := Run(ctx, registry, testRule(), Options{Now: fixedClock()})
+	if !errors.Is(err, context.Canceled) || report.Status != "failed" || report.Queried != 1 {
+		t.Fatalf("report/error = %#v %v", report, err)
+	}
+}
+
 func TestRunSkipsDisabledRule(t *testing.T) {
 	rule := testRule()
 	rule.Enabled = false
@@ -139,6 +176,17 @@ func TestRunSkipsDisabledRule(t *testing.T) {
 	}
 	if report.Status != "skipped" || report.Queried != 0 {
 		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestRunDoesNotSkipPreCanceledDisabledRule(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rule := testRule()
+	rule.Enabled = false
+	report, err := Run(ctx, fakeRegistry{}, rule, Options{Now: fixedClock()})
+	if !errors.Is(err, context.Canceled) || report.Status != "failed" || report.Queried != 0 {
+		t.Fatalf("report/error = %#v %v", report, err)
 	}
 }
 
@@ -169,6 +217,47 @@ func TestRunEnforcesRuntimeByteLimitBeforePublishing(t *testing.T) {
 	}
 	if report.Queried != 1 || len(batches) != 0 {
 		t.Fatalf("report/batches = %#v %#v", report, batches)
+	}
+}
+
+func TestOversizedReviewCannotSuppressDeterministicFinding(t *testing.T) {
+	tests := []struct {
+		name     string
+		required bool
+	}{
+		{name: "optional"},
+		{name: "required", required: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var batches []model.PublishBatch
+			registry := fakeRegistry{
+				sources: map[string]connector.QueryRunner{"fake": fakeSource{records: []model.Record{{"x": 1}}}},
+				sinks:   map[string]connector.Publisher{"required": fakeSink{batches: &batches}},
+			}
+			rule := testRule()
+			rule.LLM = &config.LLM{Enabled: true, Required: test.required, Prompt: "review"}
+			report, err := Run(context.Background(), registry, rule, Options{
+				Now: fixedClock(), MaxBytes: 1024,
+				Review: func(_ context.Context, findings []model.Finding, _ *config.RuleConfig) (map[string]model.Review, error) {
+					return map[string]model.Review{findings[0].ID: {
+						Verdict: "uncertain", Reason: strings.Repeat("x", 2048), Reviewer: "test/model", ReviewedAt: "2026-07-18T12:00:00Z",
+					}}, nil
+				},
+			})
+			if test.required && (err == nil || !strings.Contains(err.Error(), "required LLM review failed")) {
+				t.Fatalf("required review error = %v", err)
+			}
+			if !test.required && err != nil {
+				t.Fatalf("optional review error = %v", err)
+			}
+			if report.ReviewError == "" || !strings.Contains(report.ReviewError, "encoded byte limit") {
+				t.Fatalf("report = %#v", report)
+			}
+			if len(batches) != 1 || len(batches[0].Findings) != 1 || batches[0].Findings[0].Review != nil {
+				t.Fatalf("deterministic finding was not published without review: %#v", batches)
+			}
+		})
 	}
 }
 
@@ -257,6 +346,26 @@ func TestIncompleteReviewIsBestEffortAndCannotSuppressPublishing(t *testing.T) {
 	}
 }
 
+func TestMalformedReviewIsDiscardedBeforePublishing(t *testing.T) {
+	var batches []model.PublishBatch
+	registry := fakeRegistry{
+		sources: map[string]connector.QueryRunner{"fake": fakeSource{records: []model.Record{{"x": 1}}}},
+		sinks:   map[string]connector.Publisher{"required": fakeSink{batches: &batches}},
+	}
+	rule := testRule()
+	rule.LLM = &config.LLM{Enabled: true, Prompt: "review"}
+	report, err := Run(context.Background(), registry, rule, Options{
+		Now: fixedClock(), Review: func(_ context.Context, findings []model.Finding, _ *config.RuleConfig) (map[string]model.Review, error) {
+			return map[string]model.Review{findings[0].ID: {
+				Verdict: "uncertain", Reason: "reason", Reviewer: "test/model", ReviewedAt: "not-a-time",
+			}}, nil
+		},
+	})
+	if err != nil || !strings.Contains(report.ReviewError, "invalid reviewed_at") || len(batches) != 1 || batches[0].Findings[0].Review != nil {
+		t.Fatalf("report/batches/error = %#v %#v %v", report, batches, err)
+	}
+}
+
 func TestOptionalReviewTimeoutPreservesPublisherBudget(t *testing.T) {
 	var batches []model.PublishBatch
 	registry := fakeRegistry{
@@ -291,6 +400,42 @@ func TestRequiredReviewFailsAfterPublishingWhenReviewerMissing(t *testing.T) {
 	}
 	if len(batches) != 1 || report.ReviewError == "" {
 		t.Fatalf("report/batches = %#v %#v", report, batches)
+	}
+}
+
+func TestRequiredReviewCapFailsBeforeCallingReviewer(t *testing.T) {
+	var batches []model.PublishBatch
+	registry := fakeRegistry{
+		sources: map[string]connector.QueryRunner{"fake": fakeSource{records: []model.Record{{"x": 1}, {"x": 2}}}},
+		sinks:   map[string]connector.Publisher{"required": fakeSink{batches: &batches}},
+	}
+	rule := testRule()
+	rule.LLM = &config.LLM{Enabled: true, Required: true, Prompt: "review", MaxFindings: 1}
+	calls := 0
+	report, err := Run(context.Background(), registry, rule, Options{
+		Now: fixedClock(), Review: func(context.Context, []model.Finding, *config.RuleConfig) (map[string]model.Review, error) {
+			calls++
+			return nil, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "required LLM review failed") || report.ReviewError == "" {
+		t.Fatalf("report/error = %#v %v", report, err)
+	}
+	if calls != 0 || len(batches) != 1 || len(batches[0].Findings) != 2 {
+		t.Fatalf("calls/batches = %d %#v", calls, batches)
+	}
+}
+
+func TestSinkReceiptDoesNotClaimAttemptWhenPublisherLookupFails(t *testing.T) {
+	registry := fakeRegistry{sources: map[string]connector.QueryRunner{
+		"fake": fakeSource{records: []model.Record{{"x": 1}}},
+	}}
+	report, err := Run(context.Background(), registry, testRule(), Options{Now: fixedClock()})
+	if err == nil || len(report.Sinks) != 1 {
+		t.Fatalf("report/error = %#v %v", report, err)
+	}
+	if report.Sinks[0].Attempted != 0 || report.Sinks[0].Error == "" {
+		t.Fatalf("receipt = %#v", report.Sinks[0])
 	}
 }
 

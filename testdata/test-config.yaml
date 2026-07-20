@@ -4,11 +4,11 @@ status: test
 confidence: low
 enabled: true
 schedule: "0 */2 * * *"
-queryEngine: opensearch
-exclusionsPath: config/exclusions/example-exclusions.yaml
+queryEngine: opensearch.dev
+exclusionsPath: test-exclusions.yaml
 publishers:
- - opensearch
- - pubsub
+  - opensearch.dev
+  - stdout.default
 language: SQL
 query: SELECT * FROM logs
 output:
@@ -37,7 +37,6 @@ ttps:
     id: T222
     reference: https://example2.com
 
-# LLM Configuration
 llm:
   enabled: true
   prompt: "Prompt template"

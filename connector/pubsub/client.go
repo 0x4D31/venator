@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"cloud.google.com/go/pubsub"
-	"cloud.google.com/go/pubsub/apiv1/pubsubpb"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/0x4D31/venator/internal/model"
@@ -70,15 +70,15 @@ func (c *Client) Publish(ctx context.Context, batch model.PublishBatch) (returnE
 		returnErr = errors.Join(returnErr, client.Close())
 	}()
 
-	topic := client.Topic(c.topicID)
-	defer topic.Stop()
+	publisher := client.Publisher(c.topicID)
+	defer publisher.Stop()
 
 	publishResults := make([]*pubsub.PublishResult, 0, len(messages))
 	for _, message := range messages {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		publishResults = append(publishResults, topic.Publish(ctx, message))
+		publishResults = append(publishResults, publisher.Publish(ctx, message))
 	}
 
 	var publishErrors []error

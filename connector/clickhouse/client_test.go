@@ -251,6 +251,7 @@ func TestNormalizeConfigRejectsUnsafeOrInconsistentOptions(t *testing.T) {
 		{name: "URL address", mutate: func(cfg *config.ClickHouseConfig) { cfg.Addresses = []string{"https://localhost:8443"} }, want: "host:port"},
 		{name: "missing port", mutate: func(cfg *config.ClickHouseConfig) { cfg.Addresses = []string{"localhost"} }, want: "host:port"},
 		{name: "empty host", mutate: func(cfg *config.ClickHouseConfig) { cfg.Addresses = []string{":9000"} }, want: "host:port"},
+		{name: "non-numeric port", mutate: func(cfg *config.ClickHouseConfig) { cfg.Addresses = []string{"localhost:https"} }, want: "numeric port"},
 		{name: "bad protocol", mutate: func(cfg *config.ClickHouseConfig) { cfg.Protocol = "tcp" }, want: "unsupported protocol"},
 		{name: "bad compression", mutate: func(cfg *config.ClickHouseConfig) { cfg.Compression = "gzip" }, want: "unsupported compression"},
 		{name: "idle exceeds open", mutate: func(cfg *config.ClickHouseConfig) { cfg.MaxOpenConns = 1; cfg.MaxIdleConns = 2 }, want: "cannot exceed"},
@@ -269,11 +270,58 @@ func TestNormalizeConfigRejectsUnsafeOrInconsistentOptions(t *testing.T) {
 	}
 }
 
+func TestNormalizeConfigDoesNotExposeInvalidAddress(t *testing.T) {
+	const secret = "do-not-print"
+	cfg := baseConfig()
+	cfg.Addresses = []string{"clickhouse://user:" + secret + "@localhost:9000"}
+	_, err := normalizeConfig(cfg)
+	if err == nil || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), cfg.Addresses[0]) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestNormalizeConfigAcceptsBracketedIPv6(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Addresses = []string{"[::1]:9000"}
 	if _, err := normalizeConfig(cfg); err != nil {
 		t.Fatalf("normalizeConfig() error = %v", err)
+	}
+}
+
+func TestNormalizeConfigCapsDefaultIdleConnectionsAtOpenLimit(t *testing.T) {
+	cfg := baseConfig()
+	cfg.MaxOpenConns = 1
+	normalized, err := normalizeConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.MaxIdleConns != 1 {
+		t.Fatalf("MaxIdleConns = %d, want 1", normalized.MaxIdleConns)
+	}
+}
+
+func TestValidateConfigDoesNotMutateCaller(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Addresses = []string{" localhost:9000 "}
+	cfg.Query.Timeout = 0
+	cfg.Query.MaxRows = 0
+	wantAddresses := append([]string(nil), cfg.Addresses...)
+	wantQuery := *cfg.Query
+	wantSink := *cfg.Sink
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Addresses, wantAddresses) || *cfg.Query != wantQuery || *cfg.Sink != wantSink {
+		t.Fatalf("ValidateConfig mutated caller: %#v", cfg)
+	}
+
+	normalized, err := normalizeConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.Query == cfg.Query || normalized.Sink == cfg.Sink {
+		t.Fatal("normalizeConfig retained caller-owned role pointers")
 	}
 }
 

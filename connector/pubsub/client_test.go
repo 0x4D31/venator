@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
-	gcppubsub "cloud.google.com/go/pubsub"
+	gcppubsub "cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
+	"cloud.google.com/go/pubsub/v2/pstest"
 
 	"github.com/0x4D31/venator/internal/model"
 )
@@ -99,6 +101,44 @@ func TestPublishEmptyBatchDoesNotRequireNetwork(t *testing.T) {
 	}
 	if err := client.Publish(context.Background(), model.PublishBatch{}); err != nil {
 		t.Fatalf("Publish() error: %v", err)
+	}
+}
+
+func TestPublishRoundTripsThroughEmulator(t *testing.T) {
+	server := pstest.NewServer()
+	t.Cleanup(func() {
+		server.Close()
+		server.Wait()
+	})
+	t.Setenv("PUBSUB_EMULATOR_HOST", server.Addr)
+	const projectID = "venator-test"
+	const topicID = "findings"
+	topicName := "projects/" + projectID + "/topics/" + topicID
+	if _, err := server.GServer.CreateTopic(context.Background(), &pubsubpb.Topic{Name: topicName}); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := New(context.Background(), Config{ProjectID: projectID, TopicID: topicID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding := testFinding()
+	if err := client.Publish(context.Background(), model.PublishBatch{Findings: []model.Finding{finding}}); err != nil {
+		t.Fatal(err)
+	}
+	messages := server.Messages()
+	if len(messages) != 1 {
+		t.Fatalf("published messages = %d, want 1", len(messages))
+	}
+	if messages[0].Topic != topicName || messages[0].Attributes["finding_id"] != finding.ID {
+		t.Fatalf("unexpected published message: %+v", messages[0])
+	}
+	var got model.Finding
+	if err := json.Unmarshal(messages[0].Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != finding.ID || got.Rule.ID != finding.Rule.ID {
+		t.Fatalf("finding = %+v", got)
 	}
 }
 

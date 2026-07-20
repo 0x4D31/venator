@@ -14,12 +14,12 @@ query: |
     max(timestamp) AS timestamp,
     username,
     source_ip,
-    count() AS failures
+    map('failures', count()) AS rule_specific_data
   FROM security.authentication FINAL
   WHERE outcome = 'failure'
     AND timestamp >= now() - INTERVAL 15 MINUTE
   GROUP BY username, source_ip
-  HAVING failures >= 10
+  HAVING count() >= 10
 output:
   format: signal
   fields:
@@ -30,7 +30,7 @@ output:
     - field: SrcIP
       source: source_ip
     - field: RuleSpecificData
-      source: failures
+      source: rule_specific_data
 description: Detect a burst of failed authentications from one user and source address.
 references: []
 tags: [authentication, clickhouse]

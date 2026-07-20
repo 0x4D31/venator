@@ -20,18 +20,37 @@ type queryFactory func(context.Context) (QueryRunner, error)
 type publisherFactory func(context.Context) (Publisher, error)
 type connectorValidator func(context.Context) error
 
+type queryInitialization struct {
+	done   chan struct{}
+	source QueryRunner
+	err    error
+}
+
+type publisherInitialization struct {
+	done chan struct{}
+	sink Publisher
+	err  error
+}
+
 // Registry lazily constructs only the connectors referenced by a rule. This
 // keeps unrelated credentials and services from blocking a local one-shot run.
 type Registry struct {
-	ctx                 context.Context
-	mu                  sync.Mutex
-	queryFactories      map[string]queryFactory
-	publisherFactories  map[string]publisherFactory
-	queryValidators     map[string]connectorValidator
-	publisherValidators map[string]connectorValidator
-	queryRunners        map[string]QueryRunner
-	publishers          map[string]Publisher
-	closers             []Closer
+	ctx                       context.Context
+	mu                        sync.Mutex
+	queryFactories            map[string]queryFactory
+	publisherFactories        map[string]publisherFactory
+	queryValidators           map[string]connectorValidator
+	publisherValidators       map[string]connectorValidator
+	queryRunners              map[string]QueryRunner
+	publishers                map[string]Publisher
+	queryInitializations      map[string]*queryInitialization
+	publisherInitializations  map[string]*publisherInitialization
+	closers                   []Closer
+	initializationCleanupErrs []error
+	initializing              sync.WaitGroup
+	closeOnce                 sync.Once
+	closeErr                  error
+	closed                    bool
 }
 
 func NewRegistry(ctx context.Context, globalCfg *config.GlobalConfig, stdin io.Reader, stdout io.Writer) *Registry {
@@ -40,6 +59,8 @@ func NewRegistry(ctx context.Context, globalCfg *config.GlobalConfig, stdin io.R
 		queryFactories: make(map[string]queryFactory), publisherFactories: make(map[string]publisherFactory),
 		queryValidators: make(map[string]connectorValidator), publisherValidators: make(map[string]connectorValidator),
 		queryRunners: make(map[string]QueryRunner), publishers: make(map[string]Publisher),
+		queryInitializations:     make(map[string]*queryInitialization),
+		publisherInitializations: make(map[string]*publisherInitialization),
 	}
 	r.queryRunners["stdin.default"] = stdio.NewSource(stdin, globalCfg.Runtime.MaxRecords, globalCfg.Runtime.MaxBytes)
 	r.queryRunners["file.ndjson"] = stdio.NewFileSource(globalCfg.Runtime.MaxRecords, globalCfg.Runtime.MaxBytes)
@@ -54,15 +75,16 @@ func NewRegistry(ctx context.Context, globalCfg *config.GlobalConfig, stdin io.R
 
 func (r *Registry) registerClickHouse(connectors config.ClickHouseConnectors) {
 	for name, value := range connectors.Instances {
-		cfg := value
+		cfg := cloneClickHouseConfig(value)
 		instance := "clickhouse." + name
 		var once sync.Once
 		var client *clickhouseconnector.Client
 		var openErr error
 		open := func(ctx context.Context) (*clickhouseconnector.Client, error) {
 			once.Do(func() {
-				if openErr = config.ResolveEnv(&cfg); openErr == nil {
-					client, openErr = clickhouseconnector.Open(ctx, cfg)
+				resolved := cloneClickHouseConfig(cfg)
+				if openErr = config.ResolveEnv(&resolved); openErr == nil {
+					client, openErr = clickhouseconnector.Open(ctx, resolved)
 				}
 			})
 			return client, openErr
@@ -71,7 +93,7 @@ func (r *Registry) registerClickHouse(connectors config.ClickHouseConnectors) {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			resolved := cfg
+			resolved := cloneClickHouseConfig(cfg)
 			if err := config.ResolveEnv(&resolved); err != nil {
 				return err
 			}
@@ -100,6 +122,19 @@ func (r *Registry) registerClickHouse(connectors config.ClickHouseConnectors) {
 	}
 }
 
+func cloneClickHouseConfig(cfg config.ClickHouseConfig) config.ClickHouseConfig {
+	cfg.Addresses = append([]string(nil), cfg.Addresses...)
+	if cfg.Query != nil {
+		query := *cfg.Query
+		cfg.Query = &query
+	}
+	if cfg.Sink != nil {
+		sink := *cfg.Sink
+		cfg.Sink = &sink
+	}
+	return cfg
+}
+
 func (r *Registry) registerOpenSearch(connectors config.OpenSearchConnectors, maxRows int, maxBytes int64) {
 	for name, value := range connectors.Instances {
 		cfg := value
@@ -113,9 +148,9 @@ func (r *Registry) registerOpenSearch(connectors config.OpenSearchConnectors, ma
 				return nil, fmt.Errorf("OpenSearch URL is required")
 			}
 			return opensearch.New(ctx, opensearch.Config{
-				URL: resolved.URL, Username: resolved.Username, Password: resolved.Password,
+				URL: resolved.URL, Username: resolved.Username, Password: resolved.Password, Index: resolved.Index,
 				InsecureSkipVerify: resolved.InsecureSkipVerify, MaxRows: maxRows,
-				MaxBytes: maxBytes,
+				MaxBytes: maxBytes, SQLFetchSize: resolved.SQLFetchSize,
 			})
 		}
 		validate := func(ctx context.Context) error {
@@ -239,64 +274,139 @@ func (r *Registry) registerSlack(connectors config.SlackConnectors) {
 
 func (r *Registry) GetQueryRunner(name string) (QueryRunner, error) {
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, errors.New("connector registry is closed")
+	}
 	if source, ok := r.queryRunners[name]; ok {
 		r.mu.Unlock()
 		return source, nil
 	}
 	factory, ok := r.queryFactories[name]
-	r.mu.Unlock()
 	if !ok {
+		r.mu.Unlock()
 		return nil, fmt.Errorf("query runner %q not found", name)
 	}
+	if pending, ok := r.queryInitializations[name]; ok {
+		r.mu.Unlock()
+		<-pending.done
+		if pending.err != nil {
+			return nil, fmt.Errorf("initialize query runner %q: %w", name, pending.err)
+		}
+		return pending.source, nil
+	}
+	pending := &queryInitialization{done: make(chan struct{})}
+	r.queryInitializations[name] = pending
+	r.initializing.Add(1)
+	r.mu.Unlock()
+	defer r.initializing.Done()
+
 	source, err := factory(r.ctx)
+	if err == nil && source == nil {
+		err = errors.New("factory returned a nil source")
+	}
+	r.mu.Lock()
+	if r.closed && err == nil {
+		err = errors.New("connector registry is closed")
+	} else if err == nil {
+		r.queryRunners[name] = source
+		r.trackCloser(source)
+	}
+	r.mu.Unlock()
+	if err != nil {
+		err = r.closeFailedInitialization("query runner", name, source, err)
+	}
+	r.mu.Lock()
+	pending.source = source
+	pending.err = err
+	delete(r.queryInitializations, name)
+	close(pending.done)
+	r.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("initialize query runner %q: %w", name, err)
 	}
-	r.mu.Lock()
-	if existing, ok := r.queryRunners[name]; ok {
-		r.mu.Unlock()
-		if closer, ok := source.(Closer); ok {
-			_ = closer.Close()
-		}
-		return existing, nil
-	}
-	r.queryRunners[name] = source
-	r.trackCloser(source)
-	r.mu.Unlock()
 	return source, nil
 }
 
 func (r *Registry) GetPublisher(name string) (Publisher, error) {
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, errors.New("connector registry is closed")
+	}
 	if sink, ok := r.publishers[name]; ok {
 		r.mu.Unlock()
 		return sink, nil
 	}
 	factory, ok := r.publisherFactories[name]
-	r.mu.Unlock()
 	if !ok {
+		r.mu.Unlock()
 		return nil, fmt.Errorf("publisher %q not found", name)
 	}
+	if pending, ok := r.publisherInitializations[name]; ok {
+		r.mu.Unlock()
+		<-pending.done
+		if pending.err != nil {
+			return nil, fmt.Errorf("initialize publisher %q: %w", name, pending.err)
+		}
+		return pending.sink, nil
+	}
+	pending := &publisherInitialization{done: make(chan struct{})}
+	r.publisherInitializations[name] = pending
+	r.initializing.Add(1)
+	r.mu.Unlock()
+	defer r.initializing.Done()
+
 	sink, err := factory(r.ctx)
+	if err == nil && sink == nil {
+		err = errors.New("factory returned a nil publisher")
+	}
+	r.mu.Lock()
+	if r.closed && err == nil {
+		err = errors.New("connector registry is closed")
+	} else if err == nil {
+		r.publishers[name] = sink
+		r.trackCloser(sink)
+	}
+	r.mu.Unlock()
+	if err != nil {
+		err = r.closeFailedInitialization("publisher", name, sink, err)
+	}
+	r.mu.Lock()
+	pending.sink = sink
+	pending.err = err
+	delete(r.publisherInitializations, name)
+	close(pending.done)
+	r.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("initialize publisher %q: %w", name, err)
 	}
-	r.mu.Lock()
-	if existing, ok := r.publishers[name]; ok {
-		r.mu.Unlock()
-		if closer, ok := sink.(Closer); ok {
-			_ = closer.Close()
-		}
-		return existing, nil
-	}
-	r.publishers[name] = sink
-	r.trackCloser(sink)
-	r.mu.Unlock()
 	return sink, nil
+}
+
+func (r *Registry) closeFailedInitialization(role, name string, value any, initializationErr error) error {
+	closer, ok := value.(Closer)
+	if !ok {
+		return initializationErr
+	}
+	if err := closer.Close(); err != nil {
+		cleanupErr := fmt.Errorf("close %s %q after initialization failure: %w", role, name, err)
+		r.mu.Lock()
+		if r.closed {
+			r.initializationCleanupErrs = append(r.initializationCleanupErrs, cleanupErr)
+		}
+		r.mu.Unlock()
+		return errors.Join(initializationErr, cleanupErr)
+	}
+	return initializationErr
 }
 
 // ValidateReferences checks connector names and roles without resolving secrets.
 func (r *Registry) ValidateReferences(rule *config.RuleConfig) error {
+	return r.validateReferences(rule, true)
+}
+
+func (r *Registry) validateReferences(rule *config.RuleConfig, includeBestEffort bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if rule == nil {
@@ -307,7 +417,11 @@ func (r *Registry) ValidateReferences(rule *config.RuleConfig) error {
 			return fmt.Errorf("query runner %q is not configured", rule.QueryEngine)
 		}
 	}
-	for _, name := range append(append([]string(nil), rule.Publishers...), rule.BestEffortPublishers...) {
+	publishers := rule.Publishers
+	if includeBestEffort {
+		publishers = append(append([]string(nil), publishers...), rule.BestEffortPublishers...)
+	}
+	for _, name := range publishers {
 		if _, ready := r.publishers[name]; ready {
 			continue
 		}
@@ -332,7 +446,7 @@ func (r *Registry) ValidateRule(rule *config.RuleConfig) error {
 }
 
 func (r *Registry) preflightRule(rule *config.RuleConfig, includeBestEffort bool) error {
-	if err := r.ValidateReferences(rule); err != nil {
+	if err := r.validateReferences(rule, includeBestEffort); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -368,14 +482,27 @@ func (r *Registry) trackCloser(value any) {
 }
 
 func (r *Registry) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	errs := make([]error, 0, len(r.closers))
-	for i := len(r.closers) - 1; i >= 0; i-- {
-		if err := r.closers[i].Close(); err != nil {
-			errs = append(errs, err)
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.closed = true
+		r.mu.Unlock()
+		r.initializing.Wait()
+
+		r.mu.Lock()
+		closers := append([]Closer(nil), r.closers...)
+		initializationCleanupErrs := append([]error(nil), r.initializationCleanupErrs...)
+		r.closers = nil
+		r.initializationCleanupErrs = nil
+		r.mu.Unlock()
+
+		errs := make([]error, 0, len(closers)+len(initializationCleanupErrs))
+		errs = append(errs, initializationCleanupErrs...)
+		for i := len(closers) - 1; i >= 0; i-- {
+			if err := closers[i].Close(); err != nil {
+				errs = append(errs, err)
+			}
 		}
-	}
-	r.closers = nil
-	return errors.Join(errs...)
+		r.closeErr = errors.Join(errs...)
+	})
+	return r.closeErr
 }

@@ -17,8 +17,7 @@ import (
 	"github.com/0x4D31/venator/internal/config"
 	"github.com/0x4D31/venator/internal/engine"
 	"github.com/0x4D31/venator/internal/llm"
-	llmconfig "github.com/0x4D31/venator/internal/llm/config"
-	llmmodel "github.com/0x4D31/venator/internal/llm/model"
+	"github.com/0x4D31/venator/internal/llm/provider"
 	"github.com/0x4D31/venator/internal/model"
 	"github.com/sirupsen/logrus"
 )
@@ -37,10 +36,16 @@ func realMain(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int
 	}
 	command := arguments[0]
 	if command == "--version" || command == "-v" {
+		if rejectUnexpectedArguments(arguments[1:], stderr) {
+			return 2
+		}
 		fmt.Fprintf(stdout, "venator %s\n", version)
 		return 0
 	}
 	if command == "--help" || command == "-h" {
+		if rejectUnexpectedArguments(arguments[1:], stderr) {
+			return 2
+		}
 		printUsage(stdout)
 		return 0
 	}
@@ -55,9 +60,15 @@ func realMain(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int
 	case "validate":
 		return validateCommand(arguments, stderr)
 	case "version":
+		if rejectUnexpectedArguments(arguments, stderr) {
+			return 2
+		}
 		fmt.Fprintf(stdout, "venator %s\n", version)
 		return 0
 	case "help":
+		if rejectUnexpectedArguments(arguments, stderr) {
+			return 2
+		}
 		printUsage(stdout)
 		return 0
 	default:
@@ -65,6 +76,14 @@ func realMain(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int
 		printUsage(stderr)
 		return 2
 	}
+}
+
+func rejectUnexpectedArguments(arguments []string, stderr io.Writer) bool {
+	if len(arguments) == 0 {
+		return false
+	}
+	fmt.Fprintf(stderr, "unexpected arguments: %s\n", strings.Join(arguments, " "))
+	return true
 }
 
 type commandOptions struct {
@@ -104,6 +123,9 @@ func parseOptions(arguments []string, stderr io.Writer, includeRunOptions bool) 
 func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	opts, err := parseOptions(arguments, stderr, true)
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		fmt.Fprintf(stderr, "invalid arguments: %v\n", err)
 		return 2
 	}
@@ -122,22 +144,20 @@ func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) i
 	ctx, cancel := context.WithTimeout(baseCtx, global.Runtime.Timeout.Value())
 	defer cancel()
 	registry := connector.NewRegistry(ctx, global, stdin, stdout)
+	registryClosed := false
 	defer func() {
+		if registryClosed {
+			return
+		}
 		if err := registry.Close(); err != nil {
 			logger.Errorf("close connectors: %v", err)
 		}
 	}()
-	var connectorErr error
 	if rule.Enabled || opts.force {
-		connectorErr = registry.PreflightRule(rule)
-	} else {
-		connectorErr = registry.ValidateReferences(rule)
-	}
-	if connectorErr != nil {
-		fmt.Fprintf(stderr, "invalid connector configuration: %v\n", connectorErr)
-		return 2
-	}
-	if rule.Enabled || opts.force {
+		if err := registry.PreflightRule(rule); err != nil {
+			fmt.Fprintf(stderr, "invalid connector configuration: %v\n", err)
+			return 2
+		}
 		if err := engine.ValidateRuleFiles(opts.rulePath, rule); err != nil {
 			fmt.Fprintf(stderr, "invalid rule file reference: %v\n", err)
 			return 2
@@ -145,16 +165,16 @@ func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) i
 	}
 
 	var review engine.ReviewFunc
-	if rule.LLM != nil && rule.LLM.Enabled {
+	if (rule.Enabled || opts.force) && rule.LLM != nil && rule.LLM.Enabled {
 		llmSettings := global.LLM
 		resolveErr := config.ResolveEnv(&llmSettings)
-		var client llmmodel.Client
+		var client provider.Client
 		var initErr error
 		if resolveErr != nil {
 			initErr = resolveErr
 		} else {
-			client, initErr = llm.New(llmconfig.Config{
-				Provider: llmconfig.Provider(llmSettings.Provider), APIKey: llmSettings.APIKey,
+			client, initErr = llm.New(provider.Config{
+				Provider: provider.Provider(llmSettings.Provider), APIKey: llmSettings.APIKey,
 				Model: llmSettings.Model, ServerURL: llmSettings.ServerURL, Temperature: llmSettings.Temperature,
 			})
 		}
@@ -172,7 +192,9 @@ func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) i
 		MaxRecords: global.Runtime.MaxRecords, MaxBytes: global.Runtime.MaxBytes,
 		ReviewTimeout: global.LLM.Timeout.Value(),
 	})
-	if closeErr := registry.Close(); closeErr != nil {
+	closeErr := registry.Close()
+	registryClosed = true
+	if closeErr != nil {
 		runErr = errors.Join(runErr, fmt.Errorf("close connectors: %w", closeErr))
 		report.Status = "failed"
 		report.Error = runErr.Error()
@@ -204,6 +226,9 @@ func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) i
 func validateCommand(arguments []string, stderr io.Writer) int {
 	opts, err := parseOptions(arguments, stderr, false)
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		fmt.Fprintf(stderr, "invalid arguments: %v\n", err)
 		return 2
 	}
@@ -213,6 +238,11 @@ func validateCommand(arguments []string, stderr io.Writer) int {
 		return 2
 	}
 	registry := connector.NewRegistry(context.Background(), global, strings.NewReader(""), io.Discard)
+	defer func() {
+		if err := registry.Close(); err != nil {
+			logger.Errorf("close connectors after validation: %v", err)
+		}
+	}()
 	if err := registry.ValidateRule(rule); err != nil {
 		fmt.Fprintf(stderr, "invalid connector configuration: %v\n", err)
 		return 2
@@ -237,8 +267,8 @@ func validateReviewer(rule *config.RuleConfig, global *config.GlobalConfig) erro
 	if err := config.ResolveEnv(&settings); err != nil {
 		return err
 	}
-	_, err := llm.New(llmconfig.Config{
-		Provider: llmconfig.Provider(settings.Provider), APIKey: settings.APIKey,
+	_, err := llm.New(provider.Config{
+		Provider: provider.Provider(settings.Provider), APIKey: settings.APIKey,
 		Model: settings.Model, ServerURL: settings.ServerURL, Temperature: settings.Temperature,
 	})
 	return err

@@ -32,14 +32,15 @@ not a tailer and owns no hidden offset.
 ## 3. The engine builds one finding
 
 The engine applies exclusions, builds raw or signal output once, and wraps it
-in `venator.finding/v1`. Every sink gets that same object. A finding ID is the
-SHA-256 of the rule UID plus canonical source evidence, so a scheduler retry
-has the same identity even though it has a new run ID. Byte-identical rows are
-retained and receive stable occurrence IDs instead of being silently collapsed.
-Queries should still project a stable event or aggregation key whenever the
-source has one. The rule UID is the identity namespace: reuse it across edits to
-avoid re-alerting on unchanged evidence, or change it when an edit should create
-a new alert lineage.
+in `venator.finding/v1`. Raw output retains the complete typed source record;
+signal output deliberately retains only mapped normalized fields. Every sink
+gets that same object. A finding ID is the SHA-256 of the rule UID plus the
+original source evidence, so a scheduler retry has the same identity even
+though it has a new run ID. Byte-identical rows are retained and receive stable
+occurrence IDs instead of being silently collapsed. Queries should still
+project a stable event or aggregation key whenever the source has one. The rule
+UID is the identity namespace: reuse it across edits to avoid re-alerting on
+unchanged evidence, or change it when an edit should create a new alert lineage.
 
 ## 4. AI is untrusted advisory enrichment
 
@@ -52,9 +53,11 @@ review failure.
 
 ## 5. Delivery is explicit
 
-`publishers` are required and `bestEffortPublishers` are optional. Sinks fan out
-concurrently, retain configured receipt ordering, and are all attempted. Any
-required failure makes the process exit non-zero.
+Entries in `publishers` use required-delivery semantics;
+`bestEffortPublishers` entries do not fail an otherwise successful run. At least
+one sink across the two lists is required. Sinks fan out concurrently, retain
+configured receipt ordering, and are all attempted. Any required failure makes
+the process exit non-zero.
 This is at-least-once delivery: a retry can repeat a successful Slack or Pub/Sub
 delivery after another sink failed. Stable IDs let idempotent sinks use upserts
 or deduplication; the ClickHouse schema uses that ID as its replacement key.

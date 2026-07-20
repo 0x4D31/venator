@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +77,9 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		}
 	}()
 
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 	if !rule.Enabled && !opts.Force {
 		report.Status = "skipped"
 		return report, nil
@@ -95,6 +99,9 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		return report, fmt.Errorf("query source %q: %w", rule.QueryEngine, err)
 	}
 	report.Queried = len(records)
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 	if opts.MaxRecords > 0 && len(records) > opts.MaxRecords {
 		return report, fmt.Errorf("source %q returned %d records; runtime limit is %d", rule.QueryEngine, len(records), opts.MaxRecords)
 	}
@@ -131,7 +138,6 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 	detectedAt := now().UTC()
 	findings := make([]model.Finding, 0, len(records))
 	occurrences := make(map[string]int, len(records))
-	var findingBytes int64
 	metadata := ruleMetadata(rule)
 	for i, record := range records {
 		if err := ctx.Err(); err != nil {
@@ -162,25 +168,23 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		if sig, ok := payload.(*signal.Signal); ok {
 			populateSignalFields(&finding, sig)
 		}
-		encodedFinding, err := json.Marshal(finding)
-		if err != nil {
-			return report, fmt.Errorf("measure finding %d: %w", i, err)
-		}
-		findingBytes += int64(len(encodedFinding))
-		if opts.MaxBytes > 0 && findingBytes > opts.MaxBytes {
-			return report, fmt.Errorf("findings exceed runtime encoded byte limit %d", opts.MaxBytes)
-		}
 		findings = append(findings, finding)
+	}
+	if err := measureFindings(ctx, findings, opts.MaxBytes); err != nil {
+		return report, err
 	}
 
 	if rule.LLM != nil && rule.LLM.Enabled && len(findings) > 0 {
 		var reviewErr error
-		if opts.Review == nil {
+		limit := reviewLimit(rule, len(findings))
+		if rule.LLM.Required && limit != len(findings) {
+			reviewErr = fmt.Errorf("required LLM review cannot cover all findings: maxFindings would cover %d of %d", limit, len(findings))
+		} else if opts.Review == nil {
 			reviewErr = fmt.Errorf("LLM reviewer is not configured")
 		}
 		var reviewInput []model.Finding
 		if reviewErr == nil {
-			reviewInput, reviewErr = cloneReviewInput(findings, reviewLimit(rule, len(findings)))
+			reviewInput, reviewErr = cloneReviewInput(findings, limit)
 		}
 		if reviewErr == nil {
 			var reviewCtx context.Context
@@ -193,10 +197,18 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 					reviewErr = callErr
 				} else {
 					reviewErr = applyReviews(findings, reviewInput, annotations)
-					if reviewErr == nil && rule.LLM.Required && len(reviewInput) != len(findings) {
-						reviewErr = fmt.Errorf("required LLM review covered %d of %d findings because of maxFindings", len(reviewInput), len(findings))
-					}
 				}
+			}
+		}
+		if reviewErr == nil {
+			if err := measureFindings(ctx, findings, opts.MaxBytes); err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return report, ctxErr
+				}
+				for i := range findings {
+					findings[i].Review = nil
+				}
+				reviewErr = fmt.Errorf("discard LLM review annotations: %w", err)
 			}
 		}
 		if reviewErr != nil {
@@ -228,9 +240,10 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		go func() {
 			defer publishers.Done()
 			startedSink := time.Now()
-			receipt := model.SinkReceipt{Name: spec.name, Required: spec.required, Attempted: len(findings)}
+			receipt := model.SinkReceipt{Name: spec.name, Required: spec.required}
 			publisher, err := registry.GetPublisher(spec.name)
 			if err == nil {
+				receipt.Attempted = len(findings)
 				err = publisher.Publish(ctx, batch)
 			}
 			receipt.DurationMS = time.Since(startedSink).Milliseconds()
@@ -243,19 +256,40 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 	}
 	publishers.Wait()
 	report.Sinks = receipts
-	var requiredErrors []error
+	var terminalErrors []error
+	if err := ctx.Err(); err != nil {
+		terminalErrors = append(terminalErrors, err)
+	}
 	for i, spec := range specs {
 		if spec.required && sinkErrors[i] != nil {
-			requiredErrors = append(requiredErrors, sinkErrors[i])
+			terminalErrors = append(terminalErrors, sinkErrors[i])
 		}
 	}
-	if err := errors.Join(requiredErrors...); err != nil {
+	if report.ReviewError != "" && rule.LLM.Required {
+		terminalErrors = append(terminalErrors, fmt.Errorf("required LLM review failed after deterministic findings were published: %s", report.ReviewError))
+	}
+	if err := errors.Join(terminalErrors...); err != nil {
 		return report, err
 	}
-	if report.ReviewError != "" && rule.LLM.Required {
-		return report, fmt.Errorf("required LLM review failed after deterministic findings were published: %s", report.ReviewError)
-	}
 	return report, nil
+}
+
+func measureFindings(ctx context.Context, findings []model.Finding, maxBytes int64) error {
+	var total int64
+	for i, finding := range findings {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(finding)
+		if err != nil {
+			return fmt.Errorf("measure finding %d: %w", i, err)
+		}
+		total += int64(len(encoded))
+		if maxBytes > 0 && total > maxBytes {
+			return fmt.Errorf("findings exceed runtime encoded byte limit %d", maxBytes)
+		}
+	}
+	return ctx.Err()
 }
 
 // ValidateRuleFiles resolves and parses local files referenced by a rule
@@ -346,8 +380,11 @@ func applyReviews(findings, requested []model.Finding, annotations map[string]mo
 		default:
 			return fmt.Errorf("LLM reviewer returned invalid verdict %q for finding_id %q", review.Verdict, findingID)
 		}
-		if review.Reason == "" || review.Reviewer == "" || review.ReviewedAt == "" {
+		if strings.TrimSpace(review.Reason) == "" || strings.TrimSpace(review.Reviewer) == "" || review.ReviewedAt == "" {
 			return fmt.Errorf("LLM reviewer returned incomplete annotation for finding_id %q", findingID)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, review.ReviewedAt); err != nil {
+			return fmt.Errorf("LLM reviewer returned invalid reviewed_at for finding_id %q", findingID)
 		}
 	}
 	for findingID := range expected {

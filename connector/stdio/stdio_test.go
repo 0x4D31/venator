@@ -83,6 +83,41 @@ func TestFileSourceReadsFiniteNDJSONSnapshot(t *testing.T) {
 	}
 }
 
+func TestFileSourceLimitErrorsNameTheFileConnector(t *testing.T) {
+	tests := []struct {
+		name          string
+		contents      string
+		maxRecords    int
+		maxTotalBytes int64
+	}{
+		{name: "records", contents: "{}\n{}\n", maxRecords: 1, maxTotalBytes: 1 << 20},
+		{name: "bytes", contents: "{\"value\":\"large\"}\n", maxRecords: 10, maxTotalBytes: 5},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "events.ndjson")
+			if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			source := NewFileSource(test.maxRecords, test.maxTotalBytes)
+			_, err := source.Query(context.Background(), &config.RuleConfig{Query: path})
+			if err == nil || !strings.Contains(err.Error(), "file.ndjson") || strings.Contains(err.Error(), "stdin") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestSourceEnforcesFourMiBRecordLimit(t *testing.T) {
+	const framing = "{\"value\":\"\"}"
+	input := "{\"value\":\"" + strings.Repeat("x", defaultMaxRecordBytes+1-len(framing)) + "\"}\n"
+	source := NewSource(strings.NewReader(input), 10, int64(len(input))+1)
+	_, err := source.Query(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "stdin.default NDJSON line 1 exceeds 4194304 bytes") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestFileSourceRejectsNonRegularInput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.pipe")
 	if err := os.Mkdir(path, 0o700); err != nil {

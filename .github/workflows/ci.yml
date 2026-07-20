@@ -18,11 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.25.12"
           cache: true
+          cache-dependency-path: go.sum
       - run: go mod download
       - name: Formatting
         run: test -z "$(gofmt -l .)"
@@ -33,7 +34,7 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Static analysis
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: Static build
@@ -48,14 +49,81 @@ jobs:
             --rule-config deploy/examples/rule.yaml > dist/findings.ndjson
           test "$(wc -l < dist/findings.ndjson)" -eq 2
 
+  clickhouse-integration:
+    name: ClickHouse native and HTTP integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.12"
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Start ClickHouse
+        env:
+          CLICKHOUSE_PASSWORD: test-only-clickhouse-password
+        run: docker compose -f deploy/clickhouse/compose.yaml up -d --wait clickhouse
+      - name: Exercise native and HTTP connectors
+        env:
+          VENATOR_CLICKHOUSE_INTEGRATION: "1"
+          VENATOR_CLICKHOUSE_PASSWORD: test-only-clickhouse-password
+        run: go test -count=1 -run '^TestLiveNativeAndHTTP$' ./connector/clickhouse
+      - name: Stop ClickHouse
+        if: always()
+        env:
+          CLICKHOUSE_PASSWORD: test-only-clickhouse-password
+        run: docker compose -f deploy/clickhouse/compose.yaml down -v
+
+  opensearch-integration:
+    name: OpenSearch SQL and sink integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: Test-only-9QW7dB4@HD
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.12"
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Start OpenSearch and Dashboards
+        run: docker compose -f connector/opensearch/docker-compose.yml up -d
+      - name: Wait for OpenSearch and Dashboards
+        run: |
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --insecure \
+                --user "admin:${OPENSEARCH_INITIAL_ADMIN_PASSWORD}" \
+                https://localhost:9200 >/dev/null && \
+              curl --fail --silent http://localhost:5601/api/status >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 5
+          done
+          test "$ready" = true
+      - name: Exercise nonpaged SQL, cursor SQL, and the finding sink
+        env:
+          VENATOR_OPENSEARCH_INTEGRATION: "1"
+          VENATOR_OPENSEARCH_PASSWORD: Test-only-9QW7dB4@HD
+        run: go test -count=1 -run '^TestOpenSearchIntegration$' ./connector/opensearch
+      - name: Show OpenSearch logs after failure
+        if: failure()
+        run: docker compose -f connector/opensearch/docker-compose.yml logs --no-color
+      - name: Stop OpenSearch
+        if: always()
+        run: docker compose -f connector/opensearch/docker-compose.yml down -v
+
   container:
     name: Container build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: false
@@ -67,9 +135,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
-      - uses: azure/setup-kubectl@v4
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
+      - uses: azure/setup-kubectl@v5
       - name: Lint chart
         run: helm lint config --strict
       - name: Render rule CronJobs
@@ -77,11 +145,89 @@ jobs:
           cp -R config /tmp/venator-chart
           sed -i 's/enabled: false/enabled: true/' \
             /tmp/venator-chart/rules/example/single-stage-alert.yaml
-          helm template venator /tmp/venator-chart --namespace venator > /tmp/venator.yaml
-          grep -q '^kind: CronJob$' /tmp/venator.yaml
+          sed -i '/^queryEngine:/i exclusionsPath: /app/exclusion/example-rule.yaml' \
+            /tmp/venator-chart/rules/example/single-stage-alert.yaml
           helm template venator /tmp/venator-chart --namespace venator \
+            --kube-version 1.27.0 > /tmp/venator.yaml
+          grep -q '^kind: CronJob$' /tmp/venator.yaml
+          grep -q 'name: "example-rule-exclusion"' /tmp/venator.yaml
+          helm template venator /tmp/venator-chart --namespace venator \
+            --kube-version 1.27.0 \
             -f /tmp/venator-chart/examples/clickhouse-mtls-values.yaml > /tmp/venator-mtls.yaml
           grep -q 'mountPath: /var/run/secrets/venator/clickhouse' /tmp/venator-mtls.yaml
+          helm template venator /tmp/venator-chart --namespace venator \
+            --kube-version 1.27.0 \
+            --set-json 'extraVolumes=[{"name":"cache","emptyDir":{}}]' \
+            --set-json 'extraVolumeMounts=[{"name":"cache","mountPath":"/tmp/cache"}]' \
+            > /tmp/venator-tmp-subpath.yaml
+          grep -q 'mountPath: /tmp/cache' /tmp/venator-tmp-subpath.yaml
+      - name: Reject unsafe Helm rule configuration
+        run: |
+          expect_failure() {
+            label="$1"
+            shift
+            if "$@" >/tmp/venator-expected-failure.log 2>&1; then
+              echo "expected Helm render to reject ${label}" >&2
+              exit 1
+            fi
+          }
+
+          rule=/tmp/venator-chart/rules/example/single-stage-alert.yaml
+          helm_template=(helm template venator /tmp/venator-chart \
+            --namespace venator --kube-version 1.27.0)
+          sed -i 's#/app/exclusion/example-rule.yaml#exclusions/example-rule.yaml#' "$rule"
+          expect_failure "relative exclusionsPath" "${helm_template[@]}"
+          sed -i 's#exclusions/example-rule.yaml#/app/exclusion/missing.yaml#' "$rule"
+          expect_failure "missing packaged exclusion" "${helm_template[@]}"
+          sed -i 's#/app/exclusion/missing.yaml#/app/exclusion/example-rule.yaml#' "$rule"
+
+          sed -i 's/schedule: "5 \* \* \* \*"/schedule: ""/' "$rule"
+          expect_failure "empty enabled-rule schedule" "${helm_template[@]}"
+          sed -i 's/schedule: ""/schedule: "5 * * * *"/' "$rule"
+
+          sed -i 's/enabled: true/enabled: null/' "$rule"
+          expect_failure "null enabled-rule flag" "${helm_template[@]}"
+          sed -i 's/enabled: null/enabled: true/' "$rule"
+
+          sed -i 's/schedule: "5 \* \* \* \*"/schedule: 5/' "$rule"
+          expect_failure "non-string enabled-rule schedule" "${helm_template[@]}"
+          sed -i 's/schedule: 5/schedule: "5 * * * *"/' "$rule"
+
+          expect_failure "unknown rule-scoped value key" "${helm_template[@]}" \
+              --set-string 'ruleServiceAccounts.misspelled-rule=venator'
+
+          expect_failure "reserved volume name" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"tmp","emptyDir":{}}]'
+          expect_failure "reserved volume mount name" "${helm_template[@]}" \
+              --set-json 'extraVolumeMounts=[{"name":"tmp","mountPath":"/other-tmp"}]'
+          expect_failure "duplicate volume names" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"shared","emptyDir":{}},{"name":"shared","emptyDir":{}}]'
+          expect_failure "duplicate volume mount paths" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"one","emptyDir":{}},{"name":"two","emptyDir":{}}]' \
+              --set-json 'extraVolumeMounts=[{"name":"one","mountPath":"/shared"},{"name":"two","mountPath":"/shared"}]'
+          expect_failure "reserved volume mount path" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"shadow","emptyDir":{}}]' \
+              --set-json 'extraVolumeMounts=[{"name":"shadow","mountPath":"/app/config"}]'
+          expect_failure "reserved volume mount ancestor" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"shadow","emptyDir":{}}]' \
+              --set-json 'extraVolumeMounts=[{"name":"shadow","mountPath":"/app"}]'
+          expect_failure "reserved volume mount descendant" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"shadow","emptyDir":{}}]' \
+              --set-json 'extraVolumeMounts=[{"name":"shadow","mountPath":"/app/config/global_config.yaml"}]'
+          expect_failure "reserved tmp mount path" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"shadow","emptyDir":{}}]' \
+              --set-json 'extraVolumeMounts=[{"name":"shadow","mountPath":"/tmp"}]'
+          expect_failure "reserved mount root ancestor" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"shadow","emptyDir":{}}]' \
+              --set-json 'extraVolumeMounts=[{"name":"shadow","mountPath":"/"}]'
+          expect_failure "duplicate environment variable names" "${helm_template[@]}" \
+              --set-json 'secretEnv=[{"name":"DUPLICATE","key":"password"}]' \
+              --set-json 'extraEnv=[{"name":"DUPLICATE","value":"duplicate"}]'
+          expect_failure "relative volume mount path" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"shared","emptyDir":{}}]' \
+              --set-json 'extraVolumeMounts=[{"name":"shared","mountPath":"relative"}]'
+          expect_failure "volume without a source" "${helm_template[@]}" \
+              --set-json 'extraVolumes=[{"name":"shared"}]'
       - name: Render plain Kubernetes assets
         run: kubectl kustomize deploy/kubernetes > /tmp/venator-kustomize.yaml
       - name: Validate portable deployment assets

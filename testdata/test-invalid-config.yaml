@@ -35,4 +35,4 @@ ttps:
     name: technique2
     id: T222
     reference: https://example2.com
-invalid_field: unexpected_value  # This field is not defined in Config struct
+invalid_field: unexpected_value

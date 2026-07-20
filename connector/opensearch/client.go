@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	outputIndexName       = "signals"
+	defaultOutputIndex    = "venator-findings-v1"
 	sqlPluginPath         = "/_plugins/_sql"
 	pplPluginPath         = "/_plugins/_ppl"
 	defaultHTTPTimeout    = 2 * time.Minute
@@ -35,12 +35,14 @@ const (
 )
 
 type Client struct {
-	osConfig    Config
-	osClient    *opensearchclient.Client
-	httpClient  *http.Client
-	osTransport *http.Transport
-	maxRows     int
-	maxBytes    int64
+	osConfig     Config
+	osClient     *opensearchclient.Client
+	httpClient   *http.Client
+	osTransport  *http.Transport
+	maxRows      int
+	maxBytes     int64
+	sqlFetchSize int
+	outputIndex  string
 }
 
 func New(ctx context.Context, cfg Config) (*Client, error) {
@@ -50,14 +52,36 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 
 	endpoint := strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
 	parsedURL, err := url.Parse(endpoint)
-	if err != nil || parsedURL.Host == "" || parsedURL.User != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
-		return nil, fmt.Errorf("invalid OpenSearch URL %q", cfg.URL)
+	if err != nil || parsedURL.Host == "" || parsedURL.User != nil || parsedURL.ForceQuery || parsedURL.RawQuery != "" || parsedURL.Fragment != "" ||
+		(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return nil, errors.New("invalid OpenSearch URL")
+	}
+	index := cfg.Index
+	if index == "" {
+		index = defaultOutputIndex
+	}
+	if err := validateIndexName(index); err != nil {
+		return nil, fmt.Errorf("invalid OpenSearch index: %w", err)
+	}
+	cfg.URL = endpoint
+	cfg.Index = index
+	if cfg.MaxRows <= 0 {
+		cfg.MaxRows = defaultMaxQueryRows
+	}
+	if cfg.MaxBytes <= 0 {
+		cfg.MaxBytes = 64 << 20
+	}
+	if cfg.SQLFetchSize < 0 {
+		return nil, errors.New("OpenSearch SQL fetch size cannot be negative")
+	}
+	if cfg.SQLFetchSize > cfg.MaxRows {
+		return nil, fmt.Errorf("OpenSearch SQL fetch size cannot exceed row limit %d", cfg.MaxRows)
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{ // #nosec G402 -- explicitly controlled for self-hosted clusters.
 		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		InsecureSkipVerify: cfg.InsecureSkipVerify, // #nosec G402 -- explicit self-hosted opt-out.
 	}
 	httpClient := &http.Client{
 		Transport: transport,
@@ -73,21 +97,31 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("create OpenSearch client: %w", err)
 	}
 
-	cfg.URL = endpoint
-	if cfg.MaxRows <= 0 {
-		cfg.MaxRows = defaultMaxQueryRows
-	}
-	if cfg.MaxBytes <= 0 {
-		cfg.MaxBytes = 64 << 20
-	}
 	return &Client{
-		osClient:    osc,
-		osConfig:    cfg,
-		httpClient:  httpClient,
-		osTransport: transport,
-		maxRows:     cfg.MaxRows,
-		maxBytes:    cfg.MaxBytes,
+		osClient:     osc,
+		osConfig:     cfg,
+		httpClient:   httpClient,
+		osTransport:  transport,
+		maxRows:      cfg.MaxRows,
+		maxBytes:     cfg.MaxBytes,
+		sqlFetchSize: cfg.SQLFetchSize,
+		outputIndex:  index,
 	}, nil
+}
+
+func validateIndexName(index string) error {
+	if len(index) == 0 || len(index) > 255 {
+		return errors.New("must contain between 1 and 255 bytes")
+	}
+	for i := 0; i < len(index); i++ {
+		character := index[i]
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') ||
+			(i > 0 && (character == '-' || character == '_' || character == '.')) {
+			continue
+		}
+		return errors.New("must start with a lowercase letter or digit and contain only lowercase letters, digits, dashes, underscores, and dots")
+	}
+	return nil
 }
 
 func (c *Client) Close() error {
@@ -109,17 +143,23 @@ func (c *Client) Query(ctx context.Context, cfg *config.RuleConfig) ([]model.Rec
 	}
 
 	var records []model.Record
-	var schema []map[string]string
+	var schema []QueryColumn
 	activeCursor := ""
 	var responseBytes int64
+	firstPage := true
+	seenCursors := make(map[string]struct{})
 	defer func() {
-		if activeCursor != "" {
+		if path == sqlPluginPath && activeCursor != "" {
 			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
 			_ = c.closeCursor(closeCtx, path, activeCursor)
 		}
 	}()
-	request := map[string]string{"query": query}
+	request := QueryRequest{Query: query}
+	if path == sqlPluginPath {
+		fetchSize := c.sqlFetchSize
+		request.FetchSize = &fetchSize
+	}
 	for {
 		response, pageBytes, err := c.queryPage(ctx, path, request)
 		if err != nil {
@@ -128,9 +168,28 @@ func (c *Client) Query(ctx context.Context, cfg *config.RuleConfig) ([]model.Rec
 		// Track the cursor before validating the page so malformed schemas or rows
 		// still trigger best-effort server-side cursor cleanup.
 		activeCursor = response.Cursor
+		if path == pplPluginPath && activeCursor != "" {
+			return nil, errors.New("unsupported OpenSearch PPL response: cursor pagination is not documented")
+		}
+		if path == sqlPluginPath && c.sqlFetchSize == 0 && activeCursor != "" {
+			return nil, errors.New("unexpected OpenSearch SQL cursor while sqlFetchSize is disabled")
+		}
 		responseBytes += int64(pageBytes)
 		if responseBytes > c.maxBytes {
 			return nil, fmt.Errorf("OpenSearch query responses exceeded client byte limit %d", c.maxBytes)
+		}
+		if firstPage && response.Size == nil {
+			return nil, errors.New("malformed OpenSearch query response: initial page is missing size")
+		}
+		if response.Total != nil {
+			if *response.Total < 0 {
+				return nil, errors.New("malformed OpenSearch query response: total cannot be negative")
+			}
+		}
+		if response.Size != nil {
+			if *response.Size < 0 || *response.Size != len(response.Datarows) {
+				return nil, fmt.Errorf("malformed OpenSearch query response: size %d does not match %d rows", *response.Size, len(response.Datarows))
+			}
 		}
 		if len(response.Schema) > 0 {
 			if len(schema) == 0 {
@@ -153,7 +212,15 @@ func (c *Client) Query(ctx context.Context, cfg *config.RuleConfig) ([]model.Rec
 		if activeCursor == "" {
 			return records, nil
 		}
-		request = map[string]string{"cursor": activeCursor}
+		if len(records) >= c.maxRows {
+			return nil, fmt.Errorf("OpenSearch query exceeded client row limit %d", c.maxRows)
+		}
+		if _, duplicate := seenCursors[activeCursor]; duplicate {
+			return nil, errors.New("malformed OpenSearch query response: cursor repeated")
+		}
+		seenCursors[activeCursor] = struct{}{}
+		request = QueryRequest{Cursor: activeCursor}
+		firstPage = false
 	}
 }
 
@@ -168,7 +235,7 @@ func queryPath(language string) (string, error) {
 	}
 }
 
-func (c *Client) queryPage(ctx context.Context, path string, payload map[string]string) (*QueryResponse, int, error) {
+func (c *Client) queryPage(ctx context.Context, path string, payload QueryRequest) (*QueryResponse, int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, 0, fmt.Errorf("encode OpenSearch query: %w", err)
@@ -183,7 +250,7 @@ func (c *Client) queryPage(ctx context.Context, path string, payload map[string]
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("execute OpenSearch query: %w", err)
+		return nil, 0, transportError(ctx, "execute OpenSearch query", err)
 	}
 	defer resp.Body.Close()
 
@@ -224,7 +291,7 @@ func requireJSONEOF(decoder *json.Decoder) error {
 	return errors.New("response contains trailing JSON")
 }
 
-func recordsFromRows(schema []map[string]string, rows [][]any, offset int) ([]model.Record, error) {
+func recordsFromRows(schema []QueryColumn, rows [][]any, offset int) ([]model.Record, error) {
 	results := make([]model.Record, 0, len(rows))
 	for rowIndex, row := range rows {
 		if len(row) != len(schema) {
@@ -233,9 +300,9 @@ func recordsFromRows(schema []map[string]string, rows [][]any, offset int) ([]mo
 
 		record := make(model.Record, len(schema))
 		for columnIndex, column := range schema {
-			name := column["alias"]
+			name := column.Alias
 			if name == "" {
-				name = column["name"]
+				name = column.Name
 			}
 			if name == "" {
 				return nil, fmt.Errorf("malformed OpenSearch query response: column %d has no name", columnIndex)
@@ -251,12 +318,12 @@ func recordsFromRows(schema []map[string]string, rows [][]any, offset int) ([]mo
 	return results, nil
 }
 
-func sameSchema(left, right []map[string]string) bool {
+func sameSchema(left, right []QueryColumn) bool {
 	if len(left) != len(right) {
 		return false
 	}
 	for i := range left {
-		if left[i]["name"] != right[i]["name"] || left[i]["alias"] != right[i]["alias"] {
+		if left[i] != right[i] {
 			return false
 		}
 	}
@@ -276,7 +343,7 @@ func (c *Client) closeCursor(ctx context.Context, path, cursor string) error {
 	c.setBasicAuth(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return transportError(ctx, "close OpenSearch cursor", err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorResponseSize))
@@ -290,6 +357,17 @@ func (c *Client) setBasicAuth(req *http.Request) {
 	if c.osConfig.Username != "" || c.osConfig.Password != "" {
 		req.SetBasicAuth(c.osConfig.Username, c.osConfig.Password)
 	}
+}
+
+func transportError(ctx context.Context, operation string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%s: %w", operation, ctxErr)
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("%s: %w", operation, urlErr.Err)
+	}
+	return fmt.Errorf("%s failed", operation)
 }
 
 func queryResponseError(resp *http.Response) error {
@@ -323,7 +401,7 @@ func (c *Client) Publish(ctx context.Context, batch model.PublishBatch) error {
 		return nil
 	}
 
-	chunks, err := buildBulkRequestChunks(ctx, batch.Findings)
+	chunks, err := buildBulkRequestChunks(ctx, c.outputIndex, batch.Findings)
 	if err != nil {
 		return err
 	}
@@ -348,7 +426,7 @@ func (c *Client) publishBulkChunk(ctx context.Context, chunk bulkChunk) error {
 		c.osClient.Bulk.WithContext(requestCtx),
 	)
 	if err != nil {
-		return fmt.Errorf("publish OpenSearch bulk request: %w", err)
+		return transportError(requestCtx, "publish OpenSearch bulk request", err)
 	}
 	if bulkResp == nil || bulkResp.Body == nil {
 		return errors.New("publish OpenSearch bulk request: empty response")
@@ -374,7 +452,11 @@ func (c *Client) publishBulkChunk(ctx context.Context, chunk bulkChunk) error {
 	}
 
 	var response BulkQueryResponse
-	if err := json.Unmarshal(responseBody, &response); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	if err := decoder.Decode(&response); err != nil {
+		return fmt.Errorf("decode OpenSearch bulk response: %w", err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
 		return fmt.Errorf("decode OpenSearch bulk response: %w", err)
 	}
 	if len(response.Items) != chunk.findingCount {
@@ -430,7 +512,7 @@ func safeDiagnostic(value string) string {
 	}, value))
 }
 
-func buildBulkRequestChunks(ctx context.Context, findings []model.Finding) ([]bulkChunk, error) {
+func buildBulkRequestChunks(ctx context.Context, index string, findings []model.Finding) ([]bulkChunk, error) {
 	chunks := make([]bulkChunk, 0, (len(findings)+maxBulkChunkFindings-1)/maxBulkChunkFindings)
 	var body bytes.Buffer
 	chunkCount := 0
@@ -445,7 +527,7 @@ func buildBulkRequestChunks(ctx context.Context, findings []model.Finding) ([]bu
 		encoder := json.NewEncoder(&item)
 		action := BulkRequestOp{
 			Index: &IndexReq{
-				Index: outputIndexName,
+				Index: index,
 				ID:    finding.ID,
 			},
 		}

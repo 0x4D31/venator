@@ -178,6 +178,16 @@ func TestScannedValuePreservesNativePointerEncoder(t *testing.T) {
 	}
 }
 
+func TestScannedValueDereferencesNullableTime(t *testing.T) {
+	want := time.Date(2026, time.July, 19, 12, 34, 56, 123456000, time.UTC)
+	target := &want
+	got := scannedValue(&target)
+	gotTime, ok := got.(time.Time)
+	if !ok || !gotTime.Equal(want) {
+		t.Fatalf("scannedValue() = %#v (%T), want time.Time %s", got, got, want)
+	}
+}
+
 func TestSourceUsesConfiguredTimeout(t *testing.T) {
 	var remaining time.Duration
 	conn := &fakeConnection{queryFn: func(ctx context.Context, _ string, _ ...any) (rowSet, error) {

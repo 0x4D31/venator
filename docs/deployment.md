@@ -38,8 +38,9 @@ venator \
   --rule-config /path/to/rule.yaml
 ```
 
-The rule's `schedule` field does not delay a direct invocation. It serves as
-portable metadata for deployment tooling. Configure an
+The rule's `schedule` field does not delay a direct invocation. It is opaque
+deployment metadata: Helm passes it to a Kubernetes CronJob, while other
+adapters own or translate their scheduler-specific calendars. Configure an
 independent job per rule so failures, deadlines, and retries are observable.
 
 Before deployment, verify that:
@@ -52,8 +53,8 @@ Before deployment, verify that:
 - publisher retries cannot create unacceptable duplicate alerts.
 
 Configuration supports lazy environment expansion after YAML decoding. Only
-connectors selected by the rule require their variables. Prefer references such
-as:
+connector instances and reviewers selected by the rule require their variables.
+Prefer references such as:
 
 ```yaml
 opensearch:
@@ -181,7 +182,7 @@ any Kubernetes control plane.
 
 ```sh
 helm lint config
-helm template venator config --namespace venator
+helm template venator config --namespace venator --kube-version 1.27.0
 helm upgrade --install venator config \
   --namespace venator --create-namespace \
   --set container.image=ghcr.io/0x4d31/venator:v0.2.0
@@ -211,11 +212,11 @@ mount through an overlay.
 
 The v0.2.0 chart keeps the repository-backed rule workflow while adding
 overlap control, deadlines, bounded history/retries, optional exclusion mounts,
-global or per-rule existing-Secret injection, TLS file mounts, optional per-rule ServiceAccounts,
-non-root defaults, and a versioned release image. Completed Jobs are not
-TTL-deleted by default, preserving the GKE debugging workflow; history limits
-remain configurable. Pin the image by digest where immutability is required.
-Render the chart in CI before upgrading a fleet.
+global or per-rule existing-Secret injection, TLS file mounts, optional
+per-rule ServiceAccounts, non-root defaults, and a versioned release image.
+Completed Jobs are not TTL-deleted by default, preserving the GKE debugging
+workflow; history limits remain configurable. Pin the image by digest where
+immutability is required. Render the chart in CI before upgrading a fleet.
 
 ## Operations checklist
 

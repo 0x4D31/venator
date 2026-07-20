@@ -15,7 +15,7 @@ import (
 	"github.com/0x4D31/venator/internal/model"
 )
 
-func TestPublishSendsCanonicalFindings(t *testing.T) {
+func TestPublishSendsDeterministicHumanSummary(t *testing.T) {
 	requestPayload := make(chan webhookPayload, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -40,19 +40,27 @@ func TestPublishSendsCanonicalFindings(t *testing.T) {
 	}
 
 	payload := <-requestPayload
-	if !strings.Contains(payload.Text, "1 finding(s)") || !strings.Contains(payload.Text, batch.Rule.Name) {
+	if payload.Text != "Venator generated 1 finding(s)." {
 		t.Fatalf("unexpected summary text %q", payload.Text)
 	}
-	if len(payload.Attachments) != 1 {
-		t.Fatalf("got %d attachments, want 1", len(payload.Attachments))
+	if len(payload.Blocks) != 1 {
+		t.Fatalf("got %d blocks, want 1", len(payload.Blocks))
 	}
-	attachment := payload.Attachments[0]
-	var finding model.Finding
-	if err := json.Unmarshal([]byte(attachment.Text), &finding); err != nil {
-		t.Fatalf("attachment is not canonical finding JSON: %v\n%s", err, attachment.Text)
+	block := payload.Blocks[0]
+	if block.Type != "section" || block.Text.Type != "plain_text" {
+		t.Fatalf("unexpected block: %+v", block)
 	}
-	if finding.ID != batch.Findings[0].ID || finding.RunID != batch.Findings[0].RunID || finding.Rule.ID != batch.Findings[0].Rule.ID {
-		t.Fatalf("unexpected finding in attachment: %+v", finding)
+	want := strings.Join([]string{
+		"Rule: Test rule (rule-1)",
+		"Finding ID: finding-1",
+		"Source: opensearch.logs",
+		"Detected at: 2026-07-18T12:00:00Z",
+		"Event at: not set",
+		"Verdict: not reviewed",
+		`Payload preview: {"event":"login","success":false}`,
+	}, "\n")
+	if block.Text.Text != want {
+		t.Fatalf("summary = %q, want %q", block.Text.Text, want)
 	}
 }
 
@@ -68,13 +76,94 @@ func TestPublishDisablesMarkdownForHostileFindingContent(t *testing.T) {
 	batch := testBatch()
 	batch.Rule.Name = "<!channel>"
 	batch.Findings[0].Rule.Name = "<!channel>"
-	batch.Findings[0].Payload = model.Record{"message": "``` <!channel> https://attacker.invalid"}
+	batch.Findings[0].Attributes.Message = "``` <!channel> https://attacker.invalid"
 	if err := client.Publish(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
 	body := string(<-requestBody)
-	if !strings.Contains(body, `"mrkdwn":false`) || strings.Contains(body, "mrkdwn_in") {
-		t.Fatalf("markdown was not disabled: %s", body)
+	for _, forbidden := range []string{`"mrkdwn"`, `"attachments"`, `"username"`, `"icon_emoji"`} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("payload contains legacy or Markdown field %s: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, `"type":"plain_text"`) {
+		t.Fatalf("payload does not use plain_text blocks: %s", body)
+	}
+	if strings.Contains(body, `"text":"Venator generated 1 finding(s) by`) {
+		t.Fatalf("fallback text contains rule-controlled content: %s", body)
+	}
+}
+
+func TestPublishBoundsBlockTextByUnicodeCharacters(t *testing.T) {
+	requestPayload := make(chan webhookPayload, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload webhookPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		requestPayload <- payload
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+	client := newTestClient(t, server.URL)
+	batch := testBatch()
+	batch.Findings[0].Attributes.Message = strings.Repeat("🛡", maxBlockTextRunes)
+	if err := client.Publish(context.Background(), batch); err != nil {
+		t.Fatal(err)
+	}
+	text := (<-requestPayload).Blocks[0].Text.Text
+	if got := len([]rune(text)); got > maxBlockTextRunes || !strings.HasSuffix(text, "…") || !strings.Contains(text, "Message: ") {
+		t.Fatalf("block text has %d runes and unexpected content %q", got, text)
+	}
+}
+
+func TestFindingSummaryPrefersMessageAndIncludesReviewVerdict(t *testing.T) {
+	finding := testBatch().Findings[0]
+	eventAt := time.Date(2026, time.July, 18, 11, 59, 59, 123, time.FixedZone("test", 2*60*60))
+	finding.EventAt = &eventAt
+	finding.Attributes.Message = "deterministic message"
+	finding.Review = &model.Review{Verdict: "suspicious", Reason: "unexpected administrator login"}
+
+	summary, err := findingSummary(finding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Event at: 2026-07-18T09:59:59.000000123Z",
+		"Verdict: suspicious",
+		"Review reason: unexpected administrator login",
+		"Message: deterministic message",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary %q does not contain %q", summary, want)
+		}
+	}
+	if strings.Contains(summary, "Payload preview:") {
+		t.Errorf("summary unexpectedly contains payload preview: %q", summary)
+	}
+}
+
+func TestFindingSummaryPreservesValidIdentityAtMaximumContent(t *testing.T) {
+	finding := testBatch().Findings[0]
+	finding.ID = strings.Repeat("a", 64)
+	finding.Rule.ID = "6722b4ed-f891-4906-a4b2-f57762dfc72b"
+	finding.Rule.Name = strings.Repeat("r", maxSummaryValueRunes)
+	finding.Source = strings.Repeat("s", maxSummaryValueRunes)
+	finding.Attributes.Message = strings.Repeat("m", maxEvidenceRunes)
+	finding.Review = &model.Review{
+		Verdict: strings.Repeat("v", maxSummaryValueRunes),
+		Reason:  strings.Repeat("x", maxReviewReasonRunes),
+	}
+
+	summary, err := findingSummary(finding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(summary, "Finding ID: "+finding.ID) || !strings.Contains(summary, "("+finding.Rule.ID+")") {
+		t.Fatalf("summary truncated a valid identity field: %q", summary)
+	}
+	if got := len([]rune(summary)); got > maxBlockTextRunes {
+		t.Fatalf("summary has %d runes, limit is %d", got, maxBlockTextRunes)
 	}
 }
 
@@ -172,11 +261,20 @@ func TestPublishEmptyBatchDoesNotSendRequest(t *testing.T) {
 }
 
 func TestNewRejectsInvalidWebhookURL(t *testing.T) {
-	for _, webhookURL := range []string{"", "hooks.slack.test/path", "ftp://hooks.slack.test/path"} {
+	secret := "do-not-print"
+	for _, webhookURL := range []string{
+		"", "hooks.slack.test/path", "ftp://hooks.slack.test/path",
+		"https://user:" + secret + "@hooks.slack.test/path",
+		"https://hooks.slack.test/path?token=" + secret,
+		"https://hooks.slack.test/path#" + secret,
+	} {
 		t.Run(webhookURL, func(t *testing.T) {
 			_, err := New(context.Background(), Config{WebhookURL: webhookURL})
 			if err == nil {
 				t.Fatalf("New(%q) error = nil, want an error", webhookURL)
+			}
+			if strings.Contains(err.Error(), secret) || (webhookURL != "" && strings.Contains(err.Error(), webhookURL)) {
+				t.Fatalf("New() leaked webhook URL: %v", err)
 			}
 		})
 	}

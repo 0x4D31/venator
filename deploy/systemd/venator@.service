@@ -12,7 +12,6 @@ TimeoutStartSec=30min
 UMask=0077
 
 DynamicUser=yes
-StateDirectory=venator
 NoNewPrivileges=yes
 PrivateDevices=yes
 PrivateTmp=yes

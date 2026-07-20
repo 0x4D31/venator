@@ -24,3 +24,10 @@ data:
   {{ printf "%s.yaml" $cfg.name | quote }}: |-
 {{ $.Files.Get $path | indent 4 }}
 {{- end }}
+{{- range $valueName := list "ruleServiceAccounts" "ruleSecretEnv" "ruleEnvFrom" "ruleExtraVolumes" "ruleExtraVolumeMounts" }}
+{{- range $ruleName, $_ := get $.Values $valueName }}
+{{- if not (hasKey $ruleNames $ruleName) }}
+{{- fail (printf "%s contains unknown packaged rule name %q" $valueName $ruleName) }}
+{{- end }}
+{{- end }}
+{{- end }}

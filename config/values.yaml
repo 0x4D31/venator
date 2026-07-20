@@ -5,12 +5,6 @@ container:
 
 imagePullSecrets: []
 
-# Retained for compatibility with v0.1 values files. Venator runs CronJobs and
-# therefore does not use a Deployment replica count or name overrides.
-replicaCount: 1
-nameOverride: ""
-fullnameOverride: ""
-
 cronJob:
   timeZone: Etc/UTC
   concurrencyPolicy: Forbid
@@ -44,16 +38,9 @@ containerSecurityContext:
   capabilities:
     drop: [ALL]
 
-# Backward-compatible default. The reference is optional so rules that do not
-# use OpenSearch start without a Secret. Override or empty this list as needed.
-secretEnv:
-  - name: OPENSEARCH_PASSWORD
-    secretName: ""
-    key: OSPASSWORD
-    optional: true
+secretEnv: []
 
-# Add credentials only to named rules. Set secretEnv: [] when using this for
-# complete per-rule isolation.
+# Add credentials only to named rules for per-rule isolation.
 ruleSecretEnv: {}
 
 # Existing Secrets can expose connector-specific variables without chart edits.

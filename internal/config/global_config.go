@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"reflect"
@@ -11,10 +13,15 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
-var environmentReference = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
+var (
+	environmentReference  = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
+	connectorInstanceName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+)
+
+const defaultOpenSearchIndex = "venator-findings-v1"
 
 // GlobalConfig holds the entire global configuration.
 type GlobalConfig struct {
@@ -70,6 +77,8 @@ type OpenSearchConfig struct {
 	URL                string `yaml:"url"`
 	Username           string `yaml:"username,omitempty"`
 	Password           string `yaml:"password,omitempty"`
+	Index              string `yaml:"index,omitempty"`
+	SQLFetchSize       int    `yaml:"sqlFetchSize,omitempty"`
 	InsecureSkipVerify bool   `yaml:"insecureSkipVerify"`
 }
 
@@ -131,7 +140,7 @@ type LLMConfig struct {
 	APIKey      string   `yaml:"apiKey"`
 	Model       string   `yaml:"model"`
 	ServerURL   string   `yaml:"serverURL,omitempty"`
-	Temperature float64  `yaml:"temperature"`
+	Temperature *float64 `yaml:"temperature,omitempty"`
 	Timeout     Duration `yaml:"timeout"`
 }
 
@@ -139,7 +148,12 @@ type LLMConfig struct {
 func ParseGlobalConfig(path string) (*GlobalConfig, error) {
 	var cfg GlobalConfig
 
-	fileContent, err := os.ReadFile(path)
+	file, err := openRegularConfigFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read global config file: %w", err)
+	}
+	defer file.Close()
+	fileContent, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read global config file: %w", err)
 	}
@@ -147,13 +161,16 @@ func ParseGlobalConfig(path string) (*GlobalConfig, error) {
 	// Decode before interpolation so secret values can never inject YAML. Each
 	// connector resolves its own environment references lazily when selected.
 	decoder := yaml.NewDecoder(strings.NewReader(string(fileContent)))
-	decoder.KnownFields(true) // Enforce strict field matching
+	decoder.KnownFields(true)
 
 	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to decode global config YAML: %w", err)
 	}
 	if err := requireYAMLEOF(decoder); err != nil {
 		return nil, fmt.Errorf("failed to decode global config YAML: %w", err)
+	}
+	if err := validateEnvironmentReferenceSyntax(&cfg); err != nil {
+		return nil, fmt.Errorf("invalid global config: %w", err)
 	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
@@ -177,10 +194,17 @@ func requireYAMLEOF(decoder *yaml.Decoder) error {
 // a pointer to a connector or LLM config copy; unrelated connectors are left
 // unresolved and therefore do not require their credentials in this process.
 func ResolveEnv(value any) error {
+	reflected := reflect.ValueOf(value)
+	if !reflected.IsValid() || reflected.Kind() != reflect.Pointer || reflected.IsNil() {
+		return fmt.Errorf("environment resolution requires a non-nil pointer")
+	}
+	if err := validateEnvironmentReferenceSyntax(value); err != nil {
+		return err
+	}
 	missing := map[string]struct{}{}
-	resolveEnvValue(reflect.ValueOf(value), missing)
+	walkEnvironmentValues(reflected, true, missing)
 	if len(missing) == 0 {
-		return nil
+		return validateResolvedConnectorConfig(value)
 	}
 	names := make([]string, 0, len(missing))
 	for name := range missing {
@@ -190,19 +214,40 @@ func ResolveEnv(value any) error {
 	return fmt.Errorf("references unset environment variables: %s", strings.Join(names, ", "))
 }
 
-func resolveEnvValue(value reflect.Value, missing map[string]struct{}) {
-	if !value.IsValid() {
-		return
+func validateResolvedConnectorConfig(value any) error {
+	switch cfg := value.(type) {
+	case *PubSubConfig:
+		return validatePubSubConfig(*cfg)
+	case *BigQueryConfig:
+		return validateBigQueryConfig(*cfg)
+	default:
+		return nil
 	}
-	if value.Kind() == reflect.Pointer {
-		if !value.IsNil() {
-			resolveEnvValue(value.Elem(), missing)
+}
+
+func validateEnvironmentReferenceSyntax(value any) error {
+	if !walkEnvironmentValues(reflect.ValueOf(value), false, nil) {
+		return fmt.Errorf("contains malformed environment reference; use ${NAME}")
+	}
+	return nil
+}
+
+func walkEnvironmentValues(value reflect.Value, expand bool, missing map[string]struct{}) bool {
+	if !value.IsValid() {
+		return true
+	}
+	for value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return true
 		}
-		return
+		value = value.Elem()
 	}
 	switch value.Kind() {
 	case reflect.String:
-		if value.CanSet() {
+		if hasMalformedEnvironmentReference(value.String()) {
+			return false
+		}
+		if expand && value.CanSet() {
 			expanded := environmentReference.ReplaceAllStringFunc(value.String(), func(reference string) string {
 				name := reference[2 : len(reference)-1]
 				resolved, ok := os.LookupEnv(name)
@@ -216,20 +261,48 @@ func resolveEnvValue(value reflect.Value, missing map[string]struct{}) {
 		}
 	case reflect.Struct:
 		for i := 0; i < value.NumField(); i++ {
-			resolveEnvValue(value.Field(i), missing)
+			if !walkEnvironmentValues(value.Field(i), expand, missing) {
+				return false
+			}
 		}
-	case reflect.Slice:
+	case reflect.Slice, reflect.Array:
 		for i := 0; i < value.Len(); i++ {
-			resolveEnvValue(value.Index(i), missing)
+			if !walkEnvironmentValues(value.Index(i), expand, missing) {
+				return false
+			}
 		}
 	case reflect.Map:
 		iterator := value.MapRange()
 		for iterator.Next() {
-			entry := reflect.New(value.Type().Elem()).Elem()
-			entry.Set(iterator.Value())
-			resolveEnvValue(entry, missing)
-			value.SetMapIndex(iterator.Key(), entry)
+			entry := iterator.Value()
+			if expand {
+				copy := reflect.New(value.Type().Elem()).Elem()
+				copy.Set(entry)
+				entry = copy
+			}
+			if !walkEnvironmentValues(entry, expand, missing) {
+				return false
+			}
+			if expand {
+				value.SetMapIndex(iterator.Key(), entry)
+			}
 		}
+	}
+	return true
+}
+
+func hasMalformedEnvironmentReference(value string) bool {
+	for offset := 0; ; {
+		index := strings.Index(value[offset:], "${")
+		if index < 0 {
+			return false
+		}
+		index += offset
+		match := environmentReference.FindStringIndex(value[index:])
+		if match == nil || match[0] != 0 {
+			return true
+		}
+		offset = index + match[1]
 	}
 }
 
@@ -245,6 +318,12 @@ func (c *GlobalConfig) applyDefaults() {
 	}
 	if c.LLM.Timeout == 0 {
 		c.LLM.Timeout = Duration(30 * time.Second)
+	}
+	for name, instance := range c.OpenSearch.Instances {
+		if instance.Index == "" {
+			instance.Index = defaultOpenSearchIndex
+		}
+		c.OpenSearch.Instances[name] = instance
 	}
 	for name, instance := range c.BigQuery.Instances {
 		if instance.MaxBytesBilled == 0 {
@@ -278,16 +357,16 @@ func (c *GlobalConfig) applyDefaults() {
 			instance.MaxOpenConns = 4
 		}
 		if instance.MaxIdleConns == 0 {
-			instance.MaxIdleConns = 2
+			instance.MaxIdleConns = min(2, instance.MaxOpenConns)
 		}
 		if instance.Query != nil {
 			if instance.Query.Timeout == 0 {
 				instance.Query.Timeout = Duration(2 * time.Minute)
 			}
-			if instance.Query.MaxRows == 0 {
+			if instance.Query.MaxRows == 0 && c.Runtime.MaxRecords > 0 {
 				instance.Query.MaxRows = uint64(c.Runtime.MaxRecords)
 			}
-			if instance.Query.MaxBytes == 0 {
+			if instance.Query.MaxBytes == 0 && c.Runtime.MaxBytes > 0 {
 				instance.Query.MaxBytes = uint64(c.Runtime.MaxBytes)
 			}
 		}
@@ -305,31 +384,53 @@ func (c *GlobalConfig) Validate() error {
 	if c.Runtime.Timeout.Value() <= 0 {
 		return fmt.Errorf("runtime.timeout must be positive")
 	}
-	if c.LLM.Temperature < 0 || c.LLM.Temperature > 2 {
+	if c.LLM.Temperature != nil && (math.IsNaN(*c.LLM.Temperature) || math.IsInf(*c.LLM.Temperature, 0) ||
+		*c.LLM.Temperature < 0 || *c.LLM.Temperature > 2) {
 		return fmt.Errorf("llm.temperature must be between 0 and 2")
 	}
 	if c.LLM.Timeout.Value() <= 0 {
 		return fmt.Errorf("llm.timeout must be positive")
 	}
+	if err := validateConnectorInstanceNames("opensearch", c.OpenSearch.Instances); err != nil {
+		return err
+	}
+	if err := validateConnectorInstanceNames("pubsub", c.PubSub.Instances); err != nil {
+		return err
+	}
+	if err := validateConnectorInstanceNames("bigquery", c.BigQuery.Instances); err != nil {
+		return err
+	}
+	if err := validateConnectorInstanceNames("slack", c.Slack.Instances); err != nil {
+		return err
+	}
+	if err := validateConnectorInstanceNames("clickhouse", c.ClickHouse.Instances); err != nil {
+		return err
+	}
 	for name, instance := range c.OpenSearch.Instances {
 		if strings.TrimSpace(instance.URL) == "" {
 			return fmt.Errorf("opensearch instance %q requires url", name)
 		}
-		if !validHTTPURL(instance.URL) {
+		if !hasEnvironmentReference(instance.URL) && !validHTTPURL(instance.URL) {
 			return fmt.Errorf("opensearch instance %q has invalid url", name)
+		}
+		if !hasEnvironmentReference(instance.Index) && !validOpenSearchIndex(instance.Index) {
+			return fmt.Errorf("opensearch instance %q has invalid index", name)
+		}
+		if instance.SQLFetchSize < 0 {
+			return fmt.Errorf("opensearch instance %q sqlFetchSize cannot be negative", name)
+		}
+		if instance.SQLFetchSize > c.Runtime.MaxRecords {
+			return fmt.Errorf("opensearch instance %q sqlFetchSize cannot exceed runtime.maxRecords (%d)", name, c.Runtime.MaxRecords)
 		}
 	}
 	for name, instance := range c.PubSub.Instances {
-		if instance.ProjectID == "" || instance.TopicID == "" {
-			return fmt.Errorf("pubsub instance %q requires projectID and topicID", name)
+		if err := validatePubSubConfig(instance); err != nil {
+			return fmt.Errorf("pubsub instance %q %w", name, err)
 		}
 	}
 	for name, instance := range c.BigQuery.Instances {
-		if instance.ProjectID == "" {
-			return fmt.Errorf("bigquery instance %q requires projectID", name)
-		}
-		if (instance.DatasetID == "") != (instance.TableID == "") {
-			return fmt.Errorf("bigquery instance %q datasetID and tableID must be configured together", name)
+		if err := validateBigQueryConfig(instance); err != nil {
+			return fmt.Errorf("bigquery instance %q %w", name, err)
 		}
 		if instance.MaxBytesBilled < 1 {
 			return fmt.Errorf("bigquery instance %q maxBytesBilled must be positive", name)
@@ -339,7 +440,7 @@ func (c *GlobalConfig) Validate() error {
 		if strings.TrimSpace(instance.WebhookURL) == "" {
 			return fmt.Errorf("slack instance %q requires webhookURL", name)
 		}
-		if !validSlackURL(instance.WebhookURL) {
+		if !hasEnvironmentReference(instance.WebhookURL) && !validSlackURL(instance.WebhookURL) {
 			return fmt.Errorf("slack instance %q has invalid webhookURL", name)
 		}
 		if instance.MaxFindings < 1 || instance.MaxFindings > 50 {
@@ -350,10 +451,10 @@ func (c *GlobalConfig) Validate() error {
 		if len(instance.Addresses) == 0 {
 			return fmt.Errorf("clickhouse instance %q requires at least one address", name)
 		}
-		if instance.Protocol != "native" && instance.Protocol != "http" {
+		if !hasEnvironmentReference(instance.Protocol) && instance.Protocol != "native" && instance.Protocol != "http" {
 			return fmt.Errorf("clickhouse instance %q has unsupported protocol %q", name, instance.Protocol)
 		}
-		if instance.Compression != "none" && instance.Compression != "lz4" && instance.Compression != "zstd" {
+		if !hasEnvironmentReference(instance.Compression) && instance.Compression != "none" && instance.Compression != "lz4" && instance.Compression != "zstd" {
 			return fmt.Errorf("clickhouse instance %q has unsupported compression %q", name, instance.Compression)
 		}
 		if instance.Query == nil && instance.Sink == nil {
@@ -377,7 +478,7 @@ func (c *GlobalConfig) Validate() error {
 		if instance.Sink != nil && strings.TrimSpace(instance.Sink.Table) == "" {
 			return fmt.Errorf("clickhouse instance %q sink.table is required", name)
 		}
-		if instance.Sink != nil && !safeTableIdentifier(instance.Sink.Table) {
+		if instance.Sink != nil && !hasEnvironmentReference(instance.Sink.Table) && !safeTableIdentifier(instance.Sink.Table) {
 			return fmt.Errorf("clickhouse instance %q sink.table must be table or database.table using letters, digits, and underscores", name)
 		}
 		if (instance.TLS.CertFile == "") != (instance.TLS.KeyFile == "") {
@@ -390,20 +491,71 @@ func (c *GlobalConfig) Validate() error {
 	return nil
 }
 
-func validHTTPURL(value string) bool {
-	if strings.Contains(value, "${") {
-		return true
+func hasEnvironmentReference(value string) bool {
+	return environmentReference.MatchString(value) && !hasMalformedEnvironmentReference(value)
+}
+
+func validatePubSubConfig(cfg PubSubConfig) error {
+	if strings.TrimSpace(cfg.ProjectID) == "" || strings.TrimSpace(cfg.TopicID) == "" {
+		return errors.New("requires projectID and topicID")
 	}
+	return nil
+}
+
+func validateBigQueryConfig(cfg BigQueryConfig) error {
+	if strings.TrimSpace(cfg.ProjectID) == "" {
+		return errors.New("requires projectID")
+	}
+	if cfg.DatasetID != "" && strings.TrimSpace(cfg.DatasetID) == "" {
+		return errors.New("datasetID cannot be blank")
+	}
+	if cfg.TableID != "" && strings.TrimSpace(cfg.TableID) == "" {
+		return errors.New("tableID cannot be blank")
+	}
+	if (cfg.DatasetID == "") != (cfg.TableID == "") {
+		return errors.New("datasetID and tableID must be configured together")
+	}
+	return nil
+}
+
+func validateConnectorInstanceNames[T any](connector string, instances map[string]T) error {
+	names := make([]string, 0, len(instances))
+	for name := range instances {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !connectorInstanceName.MatchString(name) {
+			return fmt.Errorf("%s instance name %q must contain only letters, digits, hyphens, and underscores", connector, name)
+		}
+	}
+	return nil
+}
+
+func validHTTPURL(value string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(value))
-	return err == nil && parsed.Host != "" && parsed.User == nil && (parsed.Scheme == "http" || parsed.Scheme == "https")
+	return err == nil && parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" &&
+		(parsed.Scheme == "http" || parsed.Scheme == "https")
+}
+
+func validOpenSearchIndex(index string) bool {
+	if len(index) == 0 || len(index) > 255 {
+		return false
+	}
+	for i := 0; i < len(index); i++ {
+		character := index[i]
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') ||
+			(i > 0 && (character == '-' || character == '_' || character == '.')) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validSlackURL(value string) bool {
-	if strings.Contains(value, "${") {
-		return true
-	}
 	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || parsed.Host == "" {
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return false
 	}
 	if parsed.Scheme == "https" {

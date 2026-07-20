@@ -20,6 +20,7 @@ const defaultMaxRecordBytes = 4 << 20
 
 type Source struct {
 	reader         io.Reader
+	name           string
 	maxRecords     int
 	maxRecordBytes int
 	maxTotalBytes  int64
@@ -40,7 +41,17 @@ type publishResult struct {
 }
 
 func NewSource(reader io.Reader, maxRecords int, maxTotalBytes int64) *Source {
-	return &Source{reader: reader, maxRecords: maxRecords, maxRecordBytes: defaultMaxRecordBytes, maxTotalBytes: maxTotalBytes}
+	return newSource(reader, "stdin.default", maxRecords, maxTotalBytes)
+}
+
+func newSource(reader io.Reader, name string, maxRecords int, maxTotalBytes int64) *Source {
+	return &Source{
+		reader:         reader,
+		name:           name,
+		maxRecords:     maxRecords,
+		maxRecordBytes: defaultMaxRecordBytes,
+		maxTotalBytes:  maxTotalBytes,
+	}
 }
 
 func NewFileSource(maxRecords int, maxTotalBytes int64) *FileSource {
@@ -55,7 +66,7 @@ func (s *FileSource) Query(ctx context.Context, rule *config.RuleConfig) ([]mode
 	if err != nil {
 		return nil, err
 	}
-	source := NewSource(file, s.maxRecords, s.maxTotalBytes)
+	source := newSource(file, "file.ndjson", s.maxRecords, s.maxTotalBytes)
 	records, queryErr := source.Query(ctx, rule)
 	closeErr := file.Close()
 	if errors.Is(closeErr, os.ErrClosed) {
@@ -83,7 +94,7 @@ func openRegularFile(path string) (*os.File, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("NDJSON file %q must be a regular file (use stdin.default for streams)", path)
 	}
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- rule.query explicitly selects the local input file.
 	if err != nil {
 		return nil, fmt.Errorf("open NDJSON file %q: %w", path, err)
 	}
@@ -121,7 +132,8 @@ func (s *Source) Query(ctx context.Context, _ *config.RuleConfig) ([]model.Recor
 
 func (s *Source) scan(ctx context.Context) ([]model.Record, error) {
 	scanner := bufio.NewScanner(s.reader)
-	scanner.Buffer(make([]byte, 64*1024), s.maxRecordBytes)
+	// Leave room for CRLF while enforcing the record-size limit explicitly.
+	scanner.Buffer(make([]byte, 64*1024), s.maxRecordBytes+2)
 	records := make([]model.Record, 0)
 	line := 0
 	var totalBytes int64
@@ -135,33 +147,36 @@ func (s *Source) scan(ctx context.Context) ([]model.Record, error) {
 		if len(scanner.Bytes()) == 0 {
 			continue
 		}
+		if len(scanner.Bytes()) > s.maxRecordBytes {
+			return nil, fmt.Errorf("%s NDJSON line %d exceeds %d bytes", s.name, line, s.maxRecordBytes)
+		}
 		totalBytes += int64(len(scanner.Bytes()))
 		if s.maxTotalBytes > 0 && totalBytes > s.maxTotalBytes {
-			return nil, fmt.Errorf("stdin produced more than %d bytes", s.maxTotalBytes)
+			return nil, fmt.Errorf("%s produced more than %d bytes", s.name, s.maxTotalBytes)
 		}
 		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
 		decoder.UseNumber()
 		var record model.Record
 		if err := decoder.Decode(&record); err != nil {
-			return nil, fmt.Errorf("decode NDJSON line %d: %w", line, err)
+			return nil, fmt.Errorf("decode %s NDJSON line %d: %w", s.name, line, err)
 		}
 		var trailing any
 		if err := decoder.Decode(&trailing); err != io.EOF {
 			if err == nil {
-				return nil, fmt.Errorf("decode NDJSON line %d: multiple JSON values", line)
+				return nil, fmt.Errorf("decode %s NDJSON line %d: multiple JSON values", s.name, line)
 			}
-			return nil, fmt.Errorf("decode NDJSON line %d trailing data: %w", line, err)
+			return nil, fmt.Errorf("decode %s NDJSON line %d trailing data: %w", s.name, line, err)
 		}
 		if record == nil {
-			return nil, fmt.Errorf("decode NDJSON line %d: expected an object", line)
+			return nil, fmt.Errorf("decode %s NDJSON line %d: expected an object", s.name, line)
 		}
 		records = append(records, record)
 		if len(records) > s.maxRecords {
-			return nil, fmt.Errorf("stdin produced more than %d records", s.maxRecords)
+			return nil, fmt.Errorf("%s produced more than %d records", s.name, s.maxRecords)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read NDJSON: %w", err)
+		return nil, fmt.Errorf("read %s NDJSON: %w", s.name, err)
 	}
 	return records, nil
 }

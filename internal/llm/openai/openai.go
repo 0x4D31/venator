@@ -3,33 +3,38 @@ package openai
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/url"
+	"strings"
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 
-	llmconfig "github.com/0x4D31/venator/internal/llm/config"
-	"github.com/0x4D31/venator/internal/llm/model"
+	"github.com/0x4D31/venator/internal/llm/provider"
 )
 
 type Client struct {
 	client      openai.Client
 	model       string
-	temperature float64
+	temperature *float64
 }
 
-func New(cfg llmconfig.Config) (model.Client, error) {
-	if cfg.APIKey == "" {
+func New(cfg provider.Config) (provider.Client, error) {
+	if strings.TrimSpace(cfg.APIKey) == "" {
 		return nil, fmt.Errorf("OpenAI API key is required")
 	}
-	if cfg.Model == "" {
+	if strings.TrimSpace(cfg.Model) == "" {
 		return nil, fmt.Errorf("OpenAI model is required")
+	}
+	if cfg.Temperature != nil && (math.IsNaN(*cfg.Temperature) || math.IsInf(*cfg.Temperature, 0) ||
+		*cfg.Temperature < 0 || *cfg.Temperature > 2) {
+		return nil, fmt.Errorf("OpenAI temperature must be between 0 and 2")
 	}
 	options := []option.RequestOption{option.WithAPIKey(cfg.APIKey)}
 	if cfg.ServerURL != "" {
 		parsed, err := url.Parse(cfg.ServerURL)
-		if err != nil || parsed.Host == "" || parsed.User != nil {
+		if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 			return nil, fmt.Errorf("OpenAI server URL is invalid")
 		}
 		if parsed.Scheme != "https" && !(parsed.Scheme == "http" && (parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1")) {
@@ -37,10 +42,15 @@ func New(cfg llmconfig.Config) (model.Client, error) {
 		}
 		options = append(options, option.WithBaseURL(cfg.ServerURL))
 	}
-	return &Client{client: openai.NewClient(options...), model: cfg.Model, temperature: cfg.Temperature}, nil
+	var temperature *float64
+	if cfg.Temperature != nil {
+		value := *cfg.Temperature
+		temperature = &value
+	}
+	return &Client{client: openai.NewClient(options...), model: cfg.Model, temperature: temperature}, nil
 }
 
-func (c *Client) Call(ctx context.Context, request model.Request) (string, error) {
+func (c *Client) Call(ctx context.Context, request provider.Request) (string, error) {
 	format := responses.ResponseFormatTextConfigParamOfJSONSchema("venator_review", reviewSchema)
 	format.OfJSONSchema.Strict = openai.Bool(true)
 	params := responses.ResponseNewParams{
@@ -52,7 +62,9 @@ func (c *Client) Call(ctx context.Context, request model.Request) (string, error
 		Text: responses.ResponseTextConfigParam{
 			Format: format,
 		},
-		Temperature: openai.Float(c.temperature),
+	}
+	if c.temperature != nil {
+		params.Temperature = openai.Float(*c.temperature)
 	}
 	response, err := c.client.Responses.New(ctx, params)
 	if err != nil {

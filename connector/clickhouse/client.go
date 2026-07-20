@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -145,21 +146,36 @@ func openWith(ctx context.Context, cfg config.ClickHouseConfig, opener driverOpe
 }
 
 func normalizeConfig(cfg config.ClickHouseConfig) (config.ClickHouseConfig, error) {
+	// The config is passed by value, but its slices and role pointers are not.
+	// Clone them before normalization so validation and concurrent registry
+	// preflight cannot mutate the caller's configuration.
+	cfg.Addresses = append([]string(nil), cfg.Addresses...)
+	if cfg.Query != nil {
+		query := *cfg.Query
+		cfg.Query = &query
+	}
+	if cfg.Sink != nil {
+		sink := *cfg.Sink
+		cfg.Sink = &sink
+	}
 	if len(cfg.Addresses) == 0 {
 		return cfg, errors.New("at least one address is required")
 	}
-	cfg.Addresses = append([]string(nil), cfg.Addresses...)
 	for i, address := range cfg.Addresses {
 		address = strings.TrimSpace(address)
 		if address == "" {
 			return cfg, fmt.Errorf("address %d is empty", i)
 		}
 		if strings.Contains(address, "://") {
-			return cfg, fmt.Errorf("address %q must be host:port, not a URL", address)
+			return cfg, fmt.Errorf("address %d must be host:port, not a URL", i)
 		}
 		host, port, err := net.SplitHostPort(address)
-		if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
-			return cfg, fmt.Errorf("address %q must be host:port (IPv6 addresses must be bracketed)", address)
+		if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" || strings.Contains(host, "@") {
+			return cfg, fmt.Errorf("address %d must be host:port (IPv6 addresses must be bracketed)", i)
+		}
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || portNumber == 0 {
+			return cfg, fmt.Errorf("address %d must use a numeric port between 1 and 65535", i)
 		}
 		cfg.Addresses[i] = address
 	}
@@ -190,7 +206,7 @@ func normalizeConfig(cfg config.ClickHouseConfig) (config.ClickHouseConfig, erro
 		cfg.MaxOpenConns = defaultMaxOpenConns
 	}
 	if cfg.MaxIdleConns == 0 {
-		cfg.MaxIdleConns = defaultMaxIdleConns
+		cfg.MaxIdleConns = min(defaultMaxIdleConns, cfg.MaxOpenConns)
 	}
 	if cfg.DialTimeout.Value() <= 0 {
 		return cfg, errors.New("dialTimeout must be positive")
