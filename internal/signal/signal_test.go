@@ -1,13 +1,15 @@
 package signal_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/0x4D31/venator/internal/config"
+	"github.com/0x4D31/venator/internal/model"
+	"github.com/0x4D31/venator/internal/signal"
 	"github.com/google/go-cmp/cmp"
-	"github.com/nianticlabs/venator/internal/config"
-	"github.com/nianticlabs/venator/internal/signal"
 )
 
 func TestBuildSignal(t *testing.T) {
@@ -26,7 +28,6 @@ func TestBuildSignal(t *testing.T) {
 			},
 		},
 	}
-	// config with unsupported output field
 	cfgInvalidOutput := &config.RuleConfig{
 		Name: "test-rule",
 		UID:  "test-uid",
@@ -42,14 +43,14 @@ func TestBuildSignal(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		result     map[string]string
+		result     model.Record
 		cfg        *config.RuleConfig
 		errMessage string
 		expected   *signal.Signal
 	}{
 		{
 			name: "successful mapping",
-			result: map[string]string{
+			result: model.Record{
 				"timestamp":          "2023-05-14T10:00:00Z",
 				"message":            "process xyz created/modified the file abc",
 				"hostname":           "hostname123",
@@ -62,9 +63,8 @@ func TestBuildSignal(t *testing.T) {
 			errMessage: "",
 			expected: &signal.Signal{
 				Timestamp: time.Date(2023, 5, 14, 10, 0, 0, 0, time.UTC),
-				Rule_ID:   cfg.UID,
-				Rule_Name: cfg.Name,
-				TTPs:      []map[string]string{},
+				RuleID:    cfg.UID,
+				RuleName:  cfg.Name,
 				Message:   "process xyz created/modified the file abc",
 				Resource:  signal.Resource{Name: "hostname123", Type: "", UID: ""},
 				Actor: signal.Actor{
@@ -72,7 +72,7 @@ func TestBuildSignal(t *testing.T) {
 				},
 				SrcEndpoint: signal.Endpoint{Hostname: "src-hostname", IP: "src-ip"},
 				DstEndpoint: signal.Endpoint{Hostname: "", IP: ""},
-				RuleSpecificData: map[string]string{
+				RuleSpecificData: map[string]any{
 					"key1": "value1",
 					"key2": "value2",
 				},
@@ -80,7 +80,7 @@ func TestBuildSignal(t *testing.T) {
 		},
 		{
 			name: "successful mapping with invalid RuleSpecificData format",
-			result: map[string]string{
+			result: model.Record{
 				"timestamp":          "2023-05-14T10:00:00Z",
 				"message":            "process xyz created/modified the file abc",
 				"hostname":           "hostname123",
@@ -93,9 +93,8 @@ func TestBuildSignal(t *testing.T) {
 			errMessage: "",
 			expected: &signal.Signal{
 				Timestamp: time.Date(2023, 5, 14, 10, 0, 0, 0, time.UTC),
-				Rule_ID:   cfg.UID,
-				Rule_Name: cfg.Name,
-				TTPs:      []map[string]string{},
+				RuleID:    cfg.UID,
+				RuleName:  cfg.Name,
 				Message:   "process xyz created/modified the file abc",
 				Resource:  signal.Resource{Name: "hostname123", Type: "", UID: ""},
 				Actor: signal.Actor{
@@ -103,14 +102,14 @@ func TestBuildSignal(t *testing.T) {
 				},
 				SrcEndpoint: signal.Endpoint{Hostname: "src-hostname", IP: "src-ip"},
 				DstEndpoint: signal.Endpoint{Hostname: "", IP: ""},
-				RuleSpecificData: map[string]string{
+				RuleSpecificData: map[string]any{
 					"raw": "key1: value1, key2: value2",
 				},
 			},
 		},
 		{
 			name: "missing field in result",
-			result: map[string]string{
+			result: model.Record{
 				"timestamp":          "2023-05-14T10:00:00Z",
 				"raw":                "process xyz created/modified the file abc",
 				"device.hostname":    "hostname123",
@@ -124,21 +123,8 @@ func TestBuildSignal(t *testing.T) {
 			expected:   nil,
 		},
 		{
-			name: "query result field count mismatch",
-			result: map[string]string{
-				"timestamp":       "2023-05-14T10:00:00Z",
-				"message":         "process xyz created/modified the file abc",
-				"device.hostname": "hostname123",
-				"actor.user.name": "user123",
-				"src.hostname":    "src-hostname",
-			},
-			cfg:        cfg,
-			errMessage: "number of query result fields mismatches expected count",
-			expected:   nil,
-		},
-		{
 			name: "invalid timestamp format",
-			result: map[string]string{
+			result: model.Record{
 				"timestamp":          "invalid-timestamp",
 				"message":            "process xyz created/modified the file abc",
 				"hostname":           "hostname123",
@@ -153,7 +139,7 @@ func TestBuildSignal(t *testing.T) {
 		},
 		{
 			name: "unsupported output field",
-			result: map[string]string{
+			result: model.Record{
 				"timestamp":       "2023-05-14T10:00:00Z",
 				"message":         "process xyz created/modified the file abc",
 				"device.hostname": "hostname123",
@@ -183,5 +169,105 @@ func TestBuildSignal(t *testing.T) {
 				t.Fatalf("unexpected result (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestBuildSignalAllowsOneSourceForMultipleFieldsAndTypedTime(t *testing.T) {
+	timestamp := time.Date(2026, 7, 18, 12, 0, 0, 123, time.FixedZone("offset", 3600))
+	cfg := &config.RuleConfig{Name: "test", UID: "id", Output: config.Output{Fields: []config.OutputField{
+		{Field: "Timestamp", Source: "time"},
+		{Field: "ResourceName", Source: "host"},
+		{Field: "DstHostname", Source: "host"},
+	}}}
+	got, err := signal.BuildSignal(model.Record{"time": timestamp, "host": "server-1"}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Resource.Name != "server-1" || got.DstEndpoint.Hostname != "server-1" {
+		t.Fatalf("signal = %#v", got)
+	}
+	if !got.Timestamp.Equal(timestamp) || got.Timestamp.Location() != time.UTC {
+		t.Fatalf("timestamp = %v", got.Timestamp)
+	}
+}
+
+func TestBuildSignalMapsTTPs(t *testing.T) {
+	cfg := &config.RuleConfig{
+		Name: "test",
+		UID:  "id",
+		TTPs: []config.TTP{{
+			Framework: "MITRE ATT&CK",
+			Tactic:    "credential-access",
+			Name:      "Credentials from Password Stores",
+			ID:        "T1555",
+			Reference: "https://attack.mitre.org/techniques/T1555/",
+		}},
+	}
+	got, err := signal.BuildSignal(model.Record{}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []signal.TTP{{
+		Framework: "MITRE ATT&CK",
+		Tactic:    "credential-access",
+		Name:      "Credentials from Password Stores",
+		ID:        "T1555",
+		Reference: "https://attack.mitre.org/techniques/T1555/",
+	}}
+	if diff := cmp.Diff(want, got.TTPs); diff != "" {
+		t.Fatalf("unexpected TTPs (-want +got):\n%s", diff)
+	}
+}
+
+func TestBuildSignalPreservesTypedRuleSpecificScalar(t *testing.T) {
+	cfg := &config.RuleConfig{Name: "test", UID: "id", Output: config.Output{Fields: []config.OutputField{
+		{Field: "RuleSpecificData", Source: "failures"},
+	}}}
+	got, err := signal.BuildSignal(model.Record{"failures": int64(12)}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := got.RuleSpecificData["raw"].(int64); !ok || value != 12 {
+		t.Fatalf("rule-specific data = %#v", got.RuleSpecificData)
+	}
+}
+
+func TestBuildSignalAcceptsTypedJSONObject(t *testing.T) {
+	cfg := &config.RuleConfig{Name: "test", UID: "id", Output: config.Output{Fields: []config.OutputField{
+		{Field: "RuleSpecificData", Source: "details"},
+	}}}
+	got, err := signal.BuildSignal(model.Record{"details": map[string]string{"state": "blocked"}}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RuleSpecificData["state"] != "blocked" {
+		t.Fatalf("rule-specific data = %#v", got.RuleSpecificData)
+	}
+}
+
+func TestSignalJSONOmitsUnmappedFields(t *testing.T) {
+	encoded, err := json.Marshal(signal.Signal{
+		RuleID:       "rule-1",
+		RuleName:     "example",
+		ConfidenceID: signal.ConfidenceLow,
+		Confidence:   "low",
+		TTPs:         []signal.TTP{{ID: "T1003"}},
+		Actor:        signal.Actor{User: signal.User{Name: "alice"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"rule_id": "rule-1", "rule_name": "example",
+		"confidence_id": float64(signal.ConfidenceLow), "confidence": "low",
+		"ttps":  []any{map[string]any{"id": "T1003"}},
+		"actor": map[string]any{"user": map[string]any{"name": "alice"}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("unexpected signal JSON (-want +got):\n%s", diff)
 	}
 }

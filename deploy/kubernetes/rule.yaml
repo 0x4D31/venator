@@ -1,0 +1,15 @@
+name: venator-example
+uid: 474d9fc1-403f-4a60-a357-2a48d8a3e663
+status: example
+confidence: low
+enabled: true
+schedule: "5 * * * *"
+source: ndjson.smoke-events
+publishers: [stdout.default]
+language: CEL
+query: event.kind == "kubernetes_smoke"
+output:
+  format: raw
+description: Detect the smoke event in a mounted finite snapshot.
+tags: [example, kubernetes]
+author: "0x4D31"

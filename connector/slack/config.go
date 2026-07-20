@@ -1,5 +1,6 @@
 package slack
 
 type Config struct {
-	WebhookURL string
+	WebhookURL  string
+	MaxFindings int
 }

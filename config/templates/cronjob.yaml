@@ -1,55 +1,207 @@
-{{ range $path, $_ :=  .Files.Glob  "rules/**.yaml" }}
-{{ $cfg := $.Files.Get $path | fromYaml }}
+{{- range $path, $_ := .Files.Glob "rules/**.yaml" }}
+{{- $cfg := $.Files.Get $path | fromYaml }}
+{{- if or (not (kindIs "string" $cfg.name)) (gt (len $cfg.name) 52) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $cfg.name)) }}
+{{- fail (printf "rule in %s has name %q; Helm rule names must be DNS-1123 labels of at most 52 characters" $path $cfg.name) }}
+{{- end }}
+{{- if and (hasKey $cfg "enabled") (not (kindIs "bool" $cfg.enabled)) }}
+{{- fail (printf "rule %s enabled must be a boolean" $cfg.name) }}
+{{- end }}
+{{- if and (hasKey $cfg "schedule") (not (kindIs "string" $cfg.schedule)) }}
+{{- fail (printf "rule %s schedule must be a string" $cfg.name) }}
+{{- end }}
+{{- if and (hasKey $cfg "exclusionsFile") (not (kindIs "string" $cfg.exclusionsFile)) }}
+{{- fail (printf "rule %s exclusionsFile must be a string" $cfg.name) }}
+{{- end }}
+{{- $exclusionsFile := default "" $cfg.exclusionsFile }}
+{{- if $exclusionsFile }}
+{{- if not (regexMatch "^/app/exclusion/[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.yaml$" $exclusionsFile) }}
+{{- fail (printf "rule %s exclusionsFile must be exactly /app/exclusion/<packaged-name>.yaml" $cfg.name) }}
+{{- end }}
+{{- $packagedExclusion := printf "exclusions/%s" ($exclusionsFile | base) }}
+{{- if eq (len ($.Files.Glob $packagedExclusion)) 0 }}
+{{- fail (printf "rule %s exclusionsFile %q does not match packaged file %s" $cfg.name $exclusionsFile $packagedExclusion) }}
+{{- end }}
+{{- end }}
+{{- $exclusionName := $exclusionsFile | base | trimSuffix ".yaml" }}
+{{- $ruleSecretEnv := default (list) (get $.Values.ruleSecretEnv $cfg.name) }}
+{{- $allSecretEnv := concat $.Values.secretEnv $ruleSecretEnv }}
+{{- $envNames := dict }}
+{{- range $env := $allSecretEnv }}
+{{- $envName := required (printf "rule %s secret environment entry requires name" $cfg.name) $env.name }}
+{{- if hasKey $envNames $envName }}
+{{- fail (printf "rule %s defines environment variable %q more than once" $cfg.name $envName) }}
+{{- end }}
+{{- $_ := set $envNames $envName true }}
+{{- end }}
+{{- range $env := $.Values.extraEnv }}
+{{- $envName := required (printf "rule %s extra environment entry requires name" $cfg.name) $env.name }}
+{{- if hasKey $envNames $envName }}
+{{- fail (printf "rule %s defines environment variable %q more than once" $cfg.name $envName) }}
+{{- end }}
+{{- $_ := set $envNames $envName true }}
+{{- end }}
+{{- $ruleEnvFrom := default (list) (get $.Values.ruleEnvFrom $cfg.name) }}
+{{- $allEnvFrom := concat $.Values.envFrom $ruleEnvFrom }}
+{{- $ruleExtraVolumes := default (list) (get $.Values.ruleExtraVolumes $cfg.name) }}
+{{- $allExtraVolumes := concat $.Values.extraVolumes $ruleExtraVolumes }}
+{{- $ruleExtraVolumeMounts := default (list) (get $.Values.ruleExtraVolumeMounts $cfg.name) }}
+{{- $allExtraVolumeMounts := concat $.Values.extraVolumeMounts $ruleExtraVolumeMounts }}
+{{- $reservedVolumeNames := list "rule-volume" "config-volume" "exclusion-volume" "tmp" }}
+{{- $volumeNames := dict }}
+{{- range $volume := $allExtraVolumes }}
+{{- $volumeName := required (printf "rule %s extra volume requires name" $cfg.name) $volume.name }}
+{{- if has $volumeName $reservedVolumeNames }}
+{{- fail (printf "rule %s extra volume name %q is reserved" $cfg.name $volumeName) }}
+{{- end }}
+{{- if hasKey $volumeNames $volumeName }}
+{{- fail (printf "rule %s defines extra volume name %q more than once" $cfg.name $volumeName) }}
+{{- end }}
+{{- $_ := set $volumeNames $volumeName true }}
+{{- end }}
+{{- $mountPaths := dict }}
+{{- $reservedAppMountPaths := list "/app/rule" "/app/config" "/app/exclusion" }}
+{{- range $mount := $allExtraVolumeMounts }}
+{{- $mountName := required (printf "rule %s extra volume mount requires name" $cfg.name) $mount.name }}
+{{- $mountPath := required (printf "rule %s extra volume mount %q requires mountPath" $cfg.name $mountName) $mount.mountPath }}
+{{- $cleanMountPath := clean $mountPath }}
+{{- $mountPathPrefix := printf "%s/" (trimSuffix "/" $cleanMountPath) }}
+{{- if has $mountName $reservedVolumeNames }}
+{{- fail (printf "rule %s extra volume mount name %q is reserved" $cfg.name $mountName) }}
+{{- end }}
+{{- if not (hasKey $volumeNames $mountName) }}
+{{- fail (printf "rule %s extra volume mount %q has no matching extra volume" $cfg.name $mountName) }}
+{{- end }}
+{{- range $reservedPath := $reservedAppMountPaths }}
+{{- if or (eq $cleanMountPath $reservedPath) (hasPrefix (printf "%s/" $reservedPath) $cleanMountPath) (hasPrefix $mountPathPrefix (printf "%s/" $reservedPath)) }}
+{{- fail (printf "rule %s extra volume mountPath %q overlaps reserved path %s" $cfg.name $mountPath $reservedPath) }}
+{{- end }}
+{{- end }}
+{{- if or (eq $cleanMountPath "/tmp") (hasPrefix $mountPathPrefix "/tmp/") }}
+{{- fail (printf "rule %s extra volume mountPath %q replaces /tmp or one of its ancestors" $cfg.name $mountPath) }}
+{{- end }}
+{{- if hasKey $mountPaths $cleanMountPath }}
+{{- fail (printf "rule %s defines extra volume mountPath %q more than once" $cfg.name $mountPath) }}
+{{- end }}
+{{- $_ := set $mountPaths $cleanMountPath true }}
+{{- end }}
 {{- if eq $cfg.enabled true }}
+{{- $defaultServiceAccount := $.Values.serviceAccount.name }}
+{{- if and $.Values.serviceAccount.create (not $defaultServiceAccount) }}
+{{- $defaultServiceAccount = printf "%s-venator" $.Release.Name }}
+{{- end }}
+{{- $serviceAccount := default $defaultServiceAccount (get $.Values.ruleServiceAccounts $cfg.name) }}
 ---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ $cfg.name }}
+  name: {{ $cfg.name | quote }}
+  labels:
+    app.kubernetes.io/name: venator
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+    app.kubernetes.io/version: {{ $.Chart.AppVersion | quote }}
+    venator.io/rule: {{ $cfg.name | quote }}
 spec:
-  timeZone: "Etc/UTC"
-  schedule: {{ $cfg.schedule | quote }}
+  timeZone: {{ $.Values.cronJob.timeZone | quote }}
+  schedule: {{ required (printf "rule %s requires schedule" $cfg.name) $cfg.schedule | quote }}
+  concurrencyPolicy: {{ $.Values.cronJob.concurrencyPolicy | quote }}
+  startingDeadlineSeconds: {{ $.Values.cronJob.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $.Values.cronJob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $.Values.cronJob.failedJobsHistoryLimit }}
   jobTemplate:
     spec:
+      activeDeadlineSeconds: {{ $.Values.cronJob.activeDeadlineSeconds }}
+      backoffLimit: {{ $.Values.cronJob.backoffLimit }}
+      {{- if ne $.Values.cronJob.ttlSecondsAfterFinished nil }}
+      ttlSecondsAfterFinished: {{ $.Values.cronJob.ttlSecondsAfterFinished }}
+      {{- end }}
       template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: venator
+            app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+            venator.io/rule: {{ $cfg.name | quote }}
+          {{- with $.Values.podAnnotations }}
+          annotations:
+{{ toYaml . | indent 12 }}
+          {{- end }}
         spec:
+          automountServiceAccountToken: {{ $.Values.serviceAccount.automountServiceAccountToken }}
+          {{- if $serviceAccount }}
+          serviceAccountName: {{ $serviceAccount | quote }}
+          {{- end }}
+          restartPolicy: Never
+          securityContext:
+{{ toYaml $.Values.podSecurityContext | indent 12 }}
+          {{- with $.Values.imagePullSecrets }}
+          imagePullSecrets:
+{{ toYaml . | indent 12 }}
+          {{- end }}
           containers:
-          - name: {{ $.Values.container.name }}
-            imagePullPolicy: Always
-            image: {{ $.Values.container.image }}
-            volumeMounts:
-            - name: rule-volume
-              mountPath: /app/rule
-            - name: config-volume
-              mountPath: /app/config
-            - name: exclusion-volume
-              mountPath: /app/exclusion
-            args:
-              - "--rule-config"
-              - "/app/rule/{{ $cfg.name }}.yaml"
-              - "--global-config"
-              - "/app/config/global_config.yaml"
-            env:
-            - name: OPENSEARCH_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: OSPASSWORD
-                  name: {{ $.Release.Name }}-secret
-            # - name: LLM_API_KEY
-            #   valueFrom:
-            #     secretKeyRef:
-            #       key: llmApiKey
-            #       name: {{ $.Release.Name }}-secret
+            - name: {{ $.Values.container.name | quote }}
+              image: {{ $.Values.container.image | quote }}
+              imagePullPolicy: {{ $.Values.container.imagePullPolicy | quote }}
+              securityContext:
+{{ toYaml $.Values.containerSecurityContext | indent 16 }}
+              resources:
+{{ toYaml $.Values.resources | indent 16 }}
+              args:
+                - run
+                - --rule-config
+                - /app/rule/{{ $cfg.name }}.yaml
+                - --global-config
+                - /app/config/global_config.yaml
+              {{- if or $allSecretEnv $.Values.extraEnv }}
+              env:
+                {{- range $allSecretEnv }}
+                - name: {{ .name | quote }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ default (printf "%s-secret" $.Release.Name) .secretName | quote }}
+                      key: {{ .key | quote }}
+                      optional: {{ default false .optional }}
+                {{- end }}
+                {{- with $.Values.extraEnv }}
+{{ toYaml $.Values.extraEnv | indent 16 }}
+                {{- end }}
+              {{- end }}
+              {{- with $allEnvFrom }}
+              envFrom:
+{{ toYaml . | indent 16 }}
+              {{- end }}
+              volumeMounts:
+                - name: rule-volume
+                  mountPath: /app/rule
+                  readOnly: true
+                - name: config-volume
+                  mountPath: /app/config
+                  readOnly: true
+                {{- if $exclusionsFile }}
+                - name: exclusion-volume
+                  mountPath: /app/exclusion
+                  readOnly: true
+                {{- end }}
+                - name: tmp
+                  mountPath: /tmp
+                {{- with $allExtraVolumeMounts }}
+{{ toYaml . | indent 16 }}
+                {{- end }}
           volumes:
-          - name: rule-volume
-            configMap:
-              name: "{{ $cfg.name }}-config"
-          - name: config-volume
-            configMap:
-              name: "global-config"
-          - name: exclusion-volume
-            configMap:
-              name: "{{ $cfg.name }}-exclusion"
-          restartPolicy: OnFailure
-{{ end }}
-{{ end }}
+            - name: rule-volume
+              configMap:
+                name: {{ printf "%s-config" $cfg.name | quote }}
+            - name: config-volume
+              configMap:
+                name: global-config
+            {{- if $exclusionsFile }}
+            - name: exclusion-volume
+              configMap:
+                name: {{ printf "%s-exclusion" $exclusionName | quote }}
+            {{- end }}
+            - name: tmp
+              emptyDir:
+                sizeLimit: 16Mi
+            {{- with $allExtraVolumes }}
+{{ toYaml . | indent 12 }}
+            {{- end }}
+{{- end }}
+{{- end }}

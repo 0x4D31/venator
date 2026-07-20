@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - cronjob.yaml
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: venator-global-config
+    namespace: venator
+    files:
+      - global.yaml
+  - name: venator-rule
+    namespace: venator
+    files:
+      - rule.yaml
+      - events.ndjson
+images:
+  - name: ghcr.io/0x4d31/venator
+    newTag: v0.2.0

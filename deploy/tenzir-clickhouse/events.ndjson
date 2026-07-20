@@ -1,0 +1,10 @@
+{"event_id":"auth-001","timestamp":"2026-07-18T12:00:00Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}
+{"event_id":"auth-002","timestamp":"2026-07-18T12:00:01Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}
+{"event_id":"auth-003","timestamp":"2026-07-18T12:00:02Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}
+{"event_id":"auth-004","timestamp":"2026-07-18T12:00:03Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}
+{"event_id":"auth-005","timestamp":"2026-07-18T12:00:04Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}
+{"event_id":"auth-006","timestamp":"2026-07-18T12:00:05Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}
+{"event_id":"auth-007","timestamp":"2026-07-18T12:00:06Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}
+{"event_id":"auth-008","timestamp":"2026-07-18T12:00:07Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}
+{"event_id":"auth-009","timestamp":"2026-07-18T12:00:08Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}
+{"event_id":"auth-010","timestamp":"2026-07-18T12:00:09Z","username":"alice","source_ip":"203.0.113.10","outcome":"failure"}

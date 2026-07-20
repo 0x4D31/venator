@@ -1,48 +1,22 @@
-# Example Rule: Single Stage Alert
-name: single-stage-alert
+# A runnable local example: bounded NDJSON events on stdin are selected with
+# CEL and become canonical Venator findings on stdout.
+name: local-ndjson-alert
 uid: 6722b4ed-f891-4906-a4b2-f57762dfc72b
 status: stable
 confidence: high
-enabled: true
-schedule: "0 */2 * * *"
-queryEngine: opensearch.logs
-exclusionsPath: app/exclusion/example-exclusion1.yaml
+enabled: false
+schedule: "5 * * * *"
+source: stdin.default
 publishers:
-  - pubsub.alerts  # Publishes alerts to PubSub for triggering security automation or notifications
-language: SQL  # The query language used for the detection logic, depending on the underlying query engine (e.g., SQL, PPL, PQL)
-query: |
-  SELECT
-    DATE_FORMAT(timestamp, '%Y-%m-%dT%H:%i:%sZ') AS timestamp,  # Formats the timestamp for consistency
-    CONCAT("Alert: process ", process.name, " executed action on ", device.hostname) AS message,  # Constructs a descriptive message
-    device.hostname,
-    actor.user.name,
-    <other fields>
-  FROM example-logs*  # Queries from indices matching the pattern
-  WHERE <condition>  # Detection logic to identify suspicious activity
-    AND timestamp >= DATE_SUB(NOW(), INTERVAL 2 HOUR)  # Limits the query to the last 2 hours
-  GROUP BY <fields>  # Deduplicates events based on specified fields
+  - stdout.default
+language: CEL
+query: has(event.severity) && event.severity >= 5
 output:
-  format: signal  # Output format: 'signal' for standardized fields or 'raw' for direct output without normalization
-  fields:  # Map query result fields to standardized signal fields (refer to `internal/signal.go` for standard field names), or use [] if format is 'raw'
-    - field: Timestamp  # Normalized field name
-      source: timestamp  # Source field from the query result
-    - field: Message
-      source: message
-    - field: ResourceName
-      source: device.hostname
-    - field: ActorUserName
-      source: actor.user.name
-description:
-  This single-stage alert rule monitors logs in OpenSearch and publishes alerts to PubSub when suspicious activity is detected.
-  Single-stage alerts are designed for high-fidelity and low-volume events that don't require further aggregation or correlation.
+  format: raw
+description: Detect high-severity events from a bounded local NDJSON producer.
 references:
-  - https://examplelink
+  - https://github.com/0x4D31/venator
 tags:
-  - test
-author: adelka
-ttps:
-  - framework: MITRE ATT&CK
-    tactic: Persistence
-    name: "Scheduled Task/Job: Cron"
-    id: T1053.003
-    reference: https://attack.mitre.org/techniques/T1053/003/
+  - local
+  - ndjson
+author: "0x4D31"

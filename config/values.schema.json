@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "dnsLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+    "envVarName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "secretEnv": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "key"],
+      "properties": {
+        "name": {"$ref": "#/definitions/envVarName"},
+        "secretName": {"type": "string"},
+        "key": {"type": "string", "minLength": 1},
+        "optional": {"type": "boolean"}
+      }
+    },
+    "localObjectReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "optional": {"type": "boolean"}
+      }
+    },
+    "envFrom": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prefix": {"type": "string"},
+        "configMapRef": {"$ref": "#/definitions/localObjectReference"},
+        "secretRef": {"$ref": "#/definitions/localObjectReference"}
+      },
+      "oneOf": [
+        {"required": ["configMapRef"]},
+        {"required": ["secretRef"]}
+      ]
+    },
+    "envVar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"$ref": "#/definitions/envVarName"},
+        "value": {"type": "string"},
+        "valueFrom": {"type": "object", "minProperties": 1}
+      },
+      "not": {"required": ["value", "valueFrom"]}
+    },
+    "volume": {
+      "type": "object",
+      "minProperties": 2,
+      "required": ["name"],
+      "properties": {
+        "name": {"$ref": "#/definitions/dnsLabel"}
+      }
+    },
+    "volumeMount": {
+      "type": "object",
+      "required": ["name", "mountPath"],
+      "properties": {
+        "name": {"$ref": "#/definitions/dnsLabel"},
+        "mountPath": {"type": "string", "minLength": 1, "pattern": "^/"},
+        "readOnly": {"type": "boolean"},
+        "subPath": {"type": "string"},
+        "subPathExpr": {"type": "string"},
+        "mountPropagation": {"enum": ["None", "HostToContainer", "Bidirectional"]}
+      }
+    }
+  },
+  "properties": {
+    "container": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "image", "imagePullPolicy"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "image": {"type": "string", "minLength": 1},
+        "imagePullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {"name": {"type": "string", "minLength": 1}}
+      }
+    },
+    "cronJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timeZone", "concurrencyPolicy", "startingDeadlineSeconds",
+        "activeDeadlineSeconds", "backoffLimit",
+        "successfulJobsHistoryLimit", "failedJobsHistoryLimit"
+      ],
+      "properties": {
+        "timeZone": {"type": "string", "minLength": 1},
+        "concurrencyPolicy": {"enum": ["Allow", "Forbid", "Replace"]},
+        "startingDeadlineSeconds": {"type": "integer", "minimum": 0},
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 1},
+        "backoffLimit": {"type": "integer", "minimum": 0},
+        "ttlSecondsAfterFinished": {"type": ["integer", "null"], "minimum": 0},
+        "successfulJobsHistoryLimit": {"type": "integer", "minimum": 0},
+        "failedJobsHistoryLimit": {"type": "integer", "minimum": 0}
+      }
+    },
+    "resources": {"type": "object"},
+    "podSecurityContext": {"type": "object"},
+    "containerSecurityContext": {"type": "object"},
+    "secretEnv": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/secretEnv"}
+    },
+    "ruleSecretEnv": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {"$ref": "#/definitions/secretEnv"}
+      }
+    },
+    "envFrom": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/envFrom"}
+    },
+    "ruleEnvFrom": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {"$ref": "#/definitions/envFrom"}
+      }
+    },
+    "extraEnv": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/envVar"}
+    },
+    "extraVolumes": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/volume"}
+    },
+    "extraVolumeMounts": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/volumeMount"}
+    },
+    "ruleExtraVolumes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {"$ref": "#/definitions/volume"}
+      }
+    },
+    "ruleExtraVolumeMounts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {"$ref": "#/definitions/volumeMount"}
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "name", "annotations", "automountServiceAccountToken"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"type": "string"},
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "automountServiceAccountToken": {"type": "boolean"}
+      }
+    },
+    "ruleServiceAccounts": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "minLength": 1}
+    }
+  },
+  "required": ["container", "cronJob"]
+}

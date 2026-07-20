@@ -1,0 +1,41 @@
+runtime:
+  maxRecords: 10000
+  maxBytes: 67108864
+  timeout: 5m
+
+clickhouse:
+  instances:
+    local-logs:
+      addresses: ["clickhouse:9000"]
+      protocol: native
+      database: security
+      username: venator
+      password: ${CLICKHOUSE_PASSWORD}
+      compression: lz4
+      dialTimeout: 5s
+      readTimeout: 2m
+      maxOpenConns: 4
+      maxIdleConns: 2
+      connMaxLifetime: 30m
+      tls:
+        enabled: false
+      query:
+        timeout: 2m
+        maxRows: 10000
+        maxBytes: 67108864
+    findings:
+      addresses: ["clickhouse:9000"]
+      protocol: native
+      database: venator
+      username: venator
+      password: ${CLICKHOUSE_PASSWORD}
+      compression: lz4
+      dialTimeout: 5s
+      readTimeout: 2m
+      maxOpenConns: 4
+      maxIdleConns: 2
+      connMaxLifetime: 30m
+      tls:
+        enabled: false
+      sink:
+        table: venator.findings

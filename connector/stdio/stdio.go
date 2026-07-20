@@ -1,0 +1,235 @@
+// Package stdio provides scheduler- and agent-friendly NDJSON boundaries.
+package stdio
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"sync"
+
+	"github.com/0x4D31/venator/internal/config"
+	"github.com/0x4D31/venator/internal/model"
+)
+
+const defaultMaxRecordBytes = 4 << 20
+
+type Source struct {
+	reader         io.Reader
+	name           string
+	maxRecords     int
+	maxRecordBytes int
+	maxTotalBytes  int64
+}
+
+type FileSource struct {
+	path          string
+	maxRecords    int
+	maxTotalBytes int64
+}
+
+type queryResult struct {
+	records []model.Record
+	err     error
+}
+
+type publishResult struct {
+	err error
+}
+
+func NewSource(reader io.Reader, maxRecords int, maxTotalBytes int64) *Source {
+	return newSource(reader, "stdin.default", maxRecords, maxTotalBytes)
+}
+
+func newSource(reader io.Reader, name string, maxRecords int, maxTotalBytes int64) *Source {
+	return &Source{
+		reader:         reader,
+		name:           name,
+		maxRecords:     maxRecords,
+		maxRecordBytes: defaultMaxRecordBytes,
+		maxTotalBytes:  maxTotalBytes,
+	}
+}
+
+func NewFileSource(path string, maxRecords int, maxTotalBytes int64) *FileSource {
+	return &FileSource{path: path, maxRecords: maxRecords, maxTotalBytes: maxTotalBytes}
+}
+
+func (s *FileSource) Query(ctx context.Context, rule *config.RuleConfig) ([]model.Record, error) {
+	if s == nil || s.path == "" {
+		return nil, fmt.Errorf("NDJSON source path is empty")
+	}
+	file, err := openRegularFile(s.path)
+	if err != nil {
+		return nil, err
+	}
+	name := "NDJSON source"
+	if rule != nil && rule.Source != "" {
+		name = rule.Source
+	}
+	source := newSource(file, name, s.maxRecords, s.maxTotalBytes)
+	records, queryErr := source.Query(ctx, rule)
+	closeErr := file.Close()
+	if errors.Is(closeErr, os.ErrClosed) {
+		closeErr = nil
+	}
+	return records, errors.Join(queryErr, closeErr)
+}
+
+// ValidateFile verifies the finite-file source without reading its contents.
+// Pipes, devices, and sockets belong at stdin.default; rejecting them here
+// prevents os.Open from blocking outside the run context.
+func ValidateFile(path string) error {
+	file, err := openRegularFile(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(file.Close())
+}
+
+func openRegularFile(path string) (*os.File, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat NDJSON file %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("NDJSON file %q must be a regular file (use stdin.default for streams)", path)
+	}
+	file, err := os.Open(path) // #nosec G304 -- the selected source profile explicitly names this file.
+	if err != nil {
+		return nil, fmt.Errorf("open NDJSON file %q: %w", path, err)
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("inspect NDJSON file %q: %w", path, err)
+	}
+	if !openedInfo.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("NDJSON file %q changed and is no longer a regular file", path)
+	}
+	return file, nil
+}
+
+func (s *Source) Query(ctx context.Context, _ *config.RuleConfig) ([]model.Record, error) {
+	result := make(chan queryResult, 1)
+	go func() {
+		records, err := s.scan(ctx)
+		result <- queryResult{records: records, err: err}
+	}()
+
+	select {
+	case completed := <-result:
+		return completed.records, completed.err
+	case <-ctx.Done():
+		// Closing a pipe, file, or os.Stdin unblocks a pending Scan. Query still
+		// returns promptly for injected readers that do not implement io.Closer.
+		if closer, ok := s.reader.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		return nil, ctx.Err()
+	}
+}
+
+func (s *Source) scan(ctx context.Context) ([]model.Record, error) {
+	scanner := bufio.NewScanner(s.reader)
+	// Leave room for CRLF while enforcing the record-size limit explicitly.
+	scanner.Buffer(make([]byte, 64*1024), s.maxRecordBytes+2)
+	records := make([]model.Record, 0)
+	line := 0
+	var totalBytes int64
+	for scanner.Scan() {
+		line++
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		if len(scanner.Bytes()) == 0 {
+			continue
+		}
+		if len(scanner.Bytes()) > s.maxRecordBytes {
+			return nil, fmt.Errorf("%s NDJSON line %d exceeds %d bytes", s.name, line, s.maxRecordBytes)
+		}
+		totalBytes += int64(len(scanner.Bytes()))
+		if s.maxTotalBytes > 0 && totalBytes > s.maxTotalBytes {
+			return nil, fmt.Errorf("%s produced more than %d bytes", s.name, s.maxTotalBytes)
+		}
+		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
+		decoder.UseNumber()
+		var record model.Record
+		if err := decoder.Decode(&record); err != nil {
+			return nil, fmt.Errorf("decode %s NDJSON line %d: %w", s.name, line, err)
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				return nil, fmt.Errorf("decode %s NDJSON line %d: multiple JSON values", s.name, line)
+			}
+			return nil, fmt.Errorf("decode %s NDJSON line %d trailing data: %w", s.name, line, err)
+		}
+		if record == nil {
+			return nil, fmt.Errorf("decode %s NDJSON line %d: expected an object", s.name, line)
+		}
+		records = append(records, record)
+		if len(records) > s.maxRecords {
+			return nil, fmt.Errorf("%s produced more than %d records", s.name, s.maxRecords)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read %s NDJSON: %w", s.name, err)
+	}
+	return records, nil
+}
+
+type Sink struct {
+	writer io.Writer
+	mu     sync.Mutex
+}
+
+func NewSink(writer io.Writer) *Sink { return &Sink{writer: writer} }
+
+func (s *Sink) Publish(ctx context.Context, batch model.PublishBatch) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	closer, cancellable := s.writer.(io.Closer)
+	if !cancellable {
+		return s.publish(ctx, batch)
+	}
+	completed := make(chan publishResult, 1)
+	go func() {
+		completed <- publishResult{err: s.publish(ctx, batch)}
+	}()
+	select {
+	case result := <-completed:
+		return result.err
+	case <-ctx.Done():
+		// os.Stdout and io.Pipe unblock a pending write when closed. Returning the
+		// context error keeps SIGTERM/runtime deadlines truthful for agent runs.
+		_ = closer.Close()
+		return ctx.Err()
+	}
+}
+
+func (s *Sink) publish(ctx context.Context, batch model.PublishBatch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	encoder := json.NewEncoder(s.writer)
+	encoder.SetEscapeHTML(false)
+	for i := range batch.Findings {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := encoder.Encode(batch.Findings[i]); err != nil {
+			return fmt.Errorf("encode finding %d: %w", i, err)
+		}
+	}
+	return nil
+}

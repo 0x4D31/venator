@@ -1,28 +1,40 @@
 package signal
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
-	"github.com/nianticlabs/venator/internal/config"
+	"github.com/0x4D31/venator/internal/config"
+	"github.com/0x4D31/venator/internal/model"
 )
 
-// Struct for the output Signal
+// Signal is the normalized output produced by signal-format rules.
 type Signal struct {
-	Timestamp        time.Time           `json:"timestamp"`
-	Rule_ID          string              `json:"rule_id"`
-	Rule_Name        string              `json:"rule_name"`
-	ConfidenceID     int                 `json:"confidenceid"`
-	Confidence       string              `json:"confidence"`
-	TTPs             []map[string]string `json:"ttps"`
-	Actor            Actor               `json:"actor"`
-	Resource         Resource            `json:"resource"`
-	SrcEndpoint      Endpoint            `json:"src_endpoint"`
-	DstEndpoint      Endpoint            `json:"dst_endpoint"`
-	Message          string              `json:"message"`
-	Metadata         Metadata            `json:"metadata"`
-	RuleSpecificData map[string]string   `json:"rule_specific_data"`
+	Timestamp        time.Time      `json:"timestamp,omitzero"`
+	RuleID           string         `json:"rule_id"`
+	RuleName         string         `json:"rule_name"`
+	ConfidenceID     int            `json:"confidence_id"`
+	Confidence       string         `json:"confidence"`
+	TTPs             []TTP          `json:"ttps,omitempty"`
+	Actor            Actor          `json:"actor,omitzero"`
+	Resource         Resource       `json:"resource,omitzero"`
+	SrcEndpoint      Endpoint       `json:"src_endpoint,omitzero"`
+	DstEndpoint      Endpoint       `json:"dst_endpoint,omitzero"`
+	Message          string         `json:"message,omitempty"`
+	Metadata         Metadata       `json:"metadata,omitzero"`
+	RuleSpecificData map[string]any `json:"rule_specific_data,omitempty"`
+}
+
+// TTP identifies a technique or tactic attached to the rule.
+type TTP struct {
+	Framework string `json:"framework,omitempty"`
+	Tactic    string `json:"tactic,omitempty"`
+	Name      string `json:"name,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Reference string `json:"reference,omitempty"`
 }
 
 type Actor struct {
@@ -30,27 +42,27 @@ type Actor struct {
 }
 
 type User struct {
-	Name string `json:"name"`
-	UID  string `json:"uid"`
+	Name string `json:"name,omitempty"`
+	UID  string `json:"uid,omitempty"`
 }
 
-// Resource that was affected by the activity/event (i.e. target of the activity)
+// Resource identifies the target of the activity.
 type Resource struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-	UID  string `json:"uid"`
+	Name string `json:"name,omitempty"`
+	Type string `json:"type,omitempty"`
+	UID  string `json:"uid,omitempty"`
 }
 
-// Endpoint represents a network endpoint
+// Endpoint represents a network endpoint.
 type Endpoint struct {
-	Hostname string `json:"hostname"`
-	IP       string `json:"ip"`
+	Hostname string `json:"hostname,omitempty"`
+	IP       string `json:"ip,omitempty"`
 }
 
-// Metadata contains additional information about the event
+// Metadata contains event identifiers.
 type Metadata struct {
-	EventID    string `json:"event_id"`
-	EventIndex string `json:"event_index"`
+	EventID    string `json:"event_id,omitempty"`
+	EventIndex string `json:"event_index,omitempty"`
 }
 
 const (
@@ -60,38 +72,43 @@ const (
 	ConfidenceHigh    int = 3
 )
 
-func BuildSignal(result map[string]string, cfg *config.RuleConfig) (*Signal, error) {
-	if len(result) < len(cfg.Output.Fields) {
-		return nil, fmt.Errorf("number of query result fields mismatches expected count")
-	}
+func BuildSignal(result model.Record, cfg *config.RuleConfig) (*Signal, error) {
 	signal := Signal{
-		Rule_ID:      cfg.UID,
-		Rule_Name:    cfg.Name,
+		RuleID:       cfg.UID,
+		RuleName:     cfg.Name,
 		ConfidenceID: getConfidenceID(cfg.Confidence),
 		Confidence:   string(cfg.Confidence),
-		TTPs:         []map[string]string{},
 	}
 	for _, ttp := range cfg.TTPs {
-		signal.TTPs = append(signal.TTPs, map[string]string{
-			"framework": ttp.Framework,
-			"tactic":    ttp.Tactic,
-			"name":      ttp.Name,
-			"id":        ttp.ID,
+		signal.TTPs = append(signal.TTPs, TTP{
+			Framework: ttp.Framework,
+			Tactic:    ttp.Tactic,
+			Name:      ttp.Name,
+			ID:        ttp.ID,
+			Reference: ttp.Reference,
 		})
 	}
 
 	for _, outputField := range cfg.Output.Fields {
-		value, exists := result[outputField.Source]
+		rawValue, exists := result[outputField.Source]
 		if !exists {
 			return nil, fmt.Errorf("source field %s not found in query results", outputField.Source)
 		}
+		value, ok := model.StringValue(rawValue)
+		if !ok {
+			return nil, fmt.Errorf("source field %s cannot be represented as text", outputField.Source)
+		}
 		switch outputField.Field {
 		case "Timestamp":
-			parsedTime, err := time.Parse(time.RFC3339, value)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse timestamp: %w", err)
+			if typedTime, ok := rawValue.(time.Time); ok {
+				signal.Timestamp = typedTime.UTC()
+				break
 			}
-			signal.Timestamp = parsedTime
+			parsedTime, err := time.Parse(time.RFC3339Nano, value)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse timestamp from %s: %w", outputField.Source, err)
+			}
+			signal.Timestamp = parsedTime.UTC()
 		case "ActorUserName":
 			signal.Actor.User.Name = value
 		case "ActorUserUID":
@@ -117,14 +134,15 @@ func BuildSignal(result map[string]string, cfg *config.RuleConfig) (*Signal, err
 		case "EventIndex":
 			signal.Metadata.EventIndex = value
 		case "RuleSpecificData":
-			var rsd map[string]interface{}
-			if err := json.Unmarshal([]byte(value), &rsd); err == nil {
-				signal.RuleSpecificData = make(map[string]string)
-				for k, v := range rsd {
-					signal.RuleSpecificData[k] = fmt.Sprintf("%v", v)
+			switch typed := rawValue.(type) {
+			case map[string]any:
+				signal.RuleSpecificData = typed
+			default:
+				if object, ok := decodeJSONObject(value); ok {
+					signal.RuleSpecificData = object
+				} else {
+					signal.RuleSpecificData = map[string]any{"raw": rawValue}
 				}
-			} else {
-				signal.RuleSpecificData = map[string]string{"raw": value}
 			}
 
 		default:
@@ -134,7 +152,21 @@ func BuildSignal(result map[string]string, cfg *config.RuleConfig) (*Signal, err
 	return &signal, nil
 }
 
-func BuildOutput(result map[string]string, cfg *config.RuleConfig) (any, error) {
+func decodeJSONObject(value string) (map[string]any, bool) {
+	decoder := json.NewDecoder(bytes.NewBufferString(value))
+	decoder.UseNumber()
+	var object map[string]any
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return nil, false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, false
+	}
+	return object, true
+}
+
+func BuildOutput(result model.Record, cfg *config.RuleConfig) (any, error) {
 	var output any
 	switch cfg.Output.Format {
 	case config.OutputFormatSignal:

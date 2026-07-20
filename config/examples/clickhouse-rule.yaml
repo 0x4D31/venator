@@ -1,0 +1,43 @@
+name: repeated-authentication-failures
+uid: a18b8614-2a4d-48d9-a70e-7a444f833174
+status: experimental
+confidence: medium
+enabled: true
+schedule: "*/15 * * * *"
+source: clickhouse.local-logs
+publishers:
+  - clickhouse.findings
+  - stdout.default
+language: SQL
+query: |
+  SELECT
+    max(timestamp) AS timestamp,
+    username,
+    source_ip,
+    map('failures', count()) AS rule_specific_data
+  FROM security.authentication FINAL
+  WHERE outcome = 'failure'
+    AND timestamp >= now() - INTERVAL 20 MINUTE
+  GROUP BY username, source_ip
+  HAVING count() >= 10
+output:
+  format: signal
+  fields:
+    - field: Timestamp
+      source: timestamp
+    - field: ActorUserName
+      source: username
+    - field: SrcIP
+      source: source_ip
+    - field: RuleSpecificData
+      source: rule_specific_data
+description: Detect a burst of failed authentications from one user and source address.
+references: []
+tags: [authentication, clickhouse]
+author: "0x4D31"
+ttps:
+  - framework: MITRE ATT&CK
+    tactic: Credential Access
+    name: Brute Force
+    id: T1110
+    reference: https://attack.mitre.org/techniques/T1110/

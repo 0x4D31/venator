@@ -1,0 +1,9 @@
+runtime:
+  maxRecords: 1000
+  maxBytes: 16777216
+  timeout: 5m
+
+ndjson:
+  instances:
+    local-events:
+      path: ./events.ndjson

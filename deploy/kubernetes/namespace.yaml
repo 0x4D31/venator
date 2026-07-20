@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: venator
+  labels:
+    app.kubernetes.io/name: venator
+    app.kubernetes.io/version: "0.2.0"

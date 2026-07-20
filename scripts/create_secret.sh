@@ -1,10 +1,17 @@
-#!/bin/bash
-# Run this script to create Secrets from the env file.
-#
-#  .vcfg.env    See dot-vcfg.env for example. Do not commit the env file to git!  
-if [ -e .vcfg.env ]
-then
-  kubectl create secret generic venator-prod-secret --from-env-file=.vcfg.env -n venator
-else
-  echo Please create .vcfg.env before running this script. See dot-vcfg.env for example.
+#!/usr/bin/env sh
+set -eu
+
+NAMESPACE=${NAMESPACE:-venator}
+SECRET_NAME=${SECRET_NAME:-venator-secrets}
+ENV_FILE=${ENV_FILE:-.vcfg.env}
+
+if [ ! -f "${ENV_FILE}" ]; then
+  printf 'Missing %s. Copy scripts/dot_vcfg.env and replace its example values.\n' "${ENV_FILE}" >&2
+  exit 1
 fi
+
+kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic "${SECRET_NAME}" \
+  --namespace "${NAMESPACE}" \
+  --from-env-file="${ENV_FILE}" \
+  --dry-run=client -o yaml | kubectl apply -f -

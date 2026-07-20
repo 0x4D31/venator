@@ -1,165 +1,213 @@
+// Package exclusion loads and evaluates named CEL exclusion expressions.
 package exclusion
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
-	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
-	"gopkg.in/yaml.v3"
+	"github.com/0x4D31/venator/internal/predicate"
+	"github.com/0x4D31/venator/internal/yamlshape"
+	"go.yaml.in/yaml/v3"
 )
 
-// Condition represents a single condition in an exclusion rule.
-type Condition struct {
-	Field    string   `yaml:"field"`
-	Operator string   `yaml:"operator"`
-	Value    string   `yaml:"value"`
-	Values   []string `yaml:"values,omitempty"` // For 'in' and 'not_in' operators
+const (
+	maxExclusions     = 256
+	maxNameCodePoints = 128
+)
+
+type definition struct {
+	Name string `yaml:"name"`
+	When string `yaml:"when"`
 }
 
-// ExclusionRule represents a single exclusion rule with conditions.
-type ExclusionRule struct {
-	Conditions ConditionGroup `yaml:"conditions"`
+type compiledExclusion struct {
+	name      string
+	predicate *predicate.Predicate
 }
 
-// ConditionGroup defines logical operators for grouping conditions.
-type ConditionGroup struct {
-	And []Condition `yaml:"and,omitempty"`
-	Or  []Condition `yaml:"or,omitempty"`
-}
-
-// Excluder manages exclusion rules loaded from a YAML file.
+// Excluder evaluates a set of named exclusion expressions.
 type Excluder struct {
-	rules []ExclusionRule
+	exclusions []compiledExclusion
 }
 
-// NewExcluder initializes an Excluder by loading rules from a YAML file.
+// NewExcluder loads and compiles exclusions from path.
 func NewExcluder(path string) (*Excluder, error) {
-	file, err := os.Open(path)
+	file, err := openRegularFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open exclusions file: %w", err)
+		return nil, err
 	}
 	defer file.Close()
 
-	var rules []ExclusionRule
+	var document yaml.Node
 	decoder := yaml.NewDecoder(file)
-	if err := decoder.Decode(&rules); err != nil {
-		return nil, fmt.Errorf("failed to decode exclusions YAML: %w", err)
+	if err := decoder.Decode(&document); err != nil {
+		if err == io.EOF {
+			return nil, decodeError(fmt.Errorf("top-level value must be a list"))
+		}
+		return nil, decodeError(err)
+	}
+	if err := requireEOF(decoder); err != nil {
+		return nil, err
+	}
+	if err := yamlshape.RejectMergeKeys(&document); err != nil {
+		return nil, decodeError(err)
+	}
+	if err := yamlshape.RejectAliasMappingKeys(&document); err != nil {
+		return nil, decodeError(err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.SequenceNode {
+		return nil, decodeError(fmt.Errorf("top-level value must be a list"))
+	}
+	sequence := document.Content[0]
+	if len(sequence.Content) > maxExclusions {
+		return nil, decodeError(fmt.Errorf("at most %d exclusions are allowed", maxExclusions))
+	}
+	if err := validateEntryShape(sequence); err != nil {
+		return nil, decodeError(err)
+	}
+	if err := yamlshape.ValidateTypes(&document, []definition{}); err != nil {
+		return nil, decodeError(err)
 	}
 
-	// Validate operators and precompile regex patterns
-	for i, rule := range rules {
-		for _, cond := range rule.Conditions.And {
-			condCopy := cond
-			if err := validateCondition(&condCopy); err != nil {
-				return nil, fmt.Errorf("invalid condition in rule %d: %w", i+1, err)
-			}
-		}
-
-		for _, cond := range rule.Conditions.Or {
-			condCopy := cond
-			if err := validateCondition(&condCopy); err != nil {
-				return nil, fmt.Errorf("invalid condition in rule %d: %w", i+1, err)
-			}
-		}
-
-		rules[i].Conditions = rule.Conditions // Ensure any modifications are kept
+	var definitions []definition
+	if err := sequence.Decode(&definitions); err != nil {
+		return nil, decodeError(err)
 	}
 
-	return &Excluder{rules: rules}, nil
+	seenNames := make(map[string]struct{}, len(definitions))
+	compiled := make([]compiledExclusion, 0, len(definitions))
+	for i, definition := range definitions {
+		position := i + 1
+		if strings.TrimSpace(definition.Name) == "" {
+			return nil, fmt.Errorf("invalid exclusion %d: name cannot be blank", position)
+		}
+		if strings.TrimSpace(definition.Name) != definition.Name {
+			return nil, fmt.Errorf("invalid exclusion %d: name must not have leading or trailing whitespace", position)
+		}
+		if strings.IndexFunc(definition.Name, unicode.IsControl) >= 0 {
+			return nil, fmt.Errorf("invalid exclusion %d: name must not contain control characters", position)
+		}
+		if utf8.RuneCountInString(definition.Name) > maxNameCodePoints {
+			return nil, fmt.Errorf("invalid exclusion %d: name must not exceed %d Unicode code points", position, maxNameCodePoints)
+		}
+		if _, duplicate := seenNames[definition.Name]; duplicate {
+			return nil, fmt.Errorf("invalid exclusion %d: duplicate name %q", position, definition.Name)
+		}
+		seenNames[definition.Name] = struct{}{}
+		if strings.TrimSpace(definition.When) == "" {
+			return nil, fmt.Errorf("invalid exclusion %q: when cannot be blank", definition.Name)
+		}
+		compiledPredicate, err := predicate.Compile(definition.When)
+		if err != nil {
+			return nil, fmt.Errorf("compile exclusion %q: %w", definition.Name, err)
+		}
+		compiled = append(compiled, compiledExclusion{
+			name:      definition.Name,
+			predicate: compiledPredicate,
+		})
+	}
+
+	return &Excluder{exclusions: compiled}, nil
 }
 
-// validateCondition checks if the condition has a supported operator and valid regex if needed.
-func validateCondition(cond *Condition) error {
-	switch cond.Operator {
-	case "equals", "contains", "not_equals":
-		// No additional validation needed
-	case "regex":
-		if _, err := regexp.Compile(cond.Value); err != nil {
-			return fmt.Errorf("invalid regex pattern '%s': %w", cond.Value, err)
+// IsExcluded reports whether any exclusion matches a prepared event.
+func (e *Excluder) IsExcluded(ctx context.Context, event map[string]any) (bool, error) {
+	for _, exclusion := range e.exclusions {
+		matched, err := exclusion.predicate.MatchPrepared(ctx, event)
+		if err != nil {
+			return false, fmt.Errorf("evaluate exclusion %q: %w", exclusion.name, err)
 		}
-	case "in", "not_in":
-		if len(cond.Values) == 0 {
-			return fmt.Errorf("operator '%s' requires 'values' field to be non-empty", cond.Operator)
+		if matched {
+			return true, nil
 		}
-	default:
-		return fmt.Errorf("unsupported operator '%s'", cond.Operator)
+	}
+	return false, nil
+}
+
+func validateEntryShape(sequence *yaml.Node) error {
+	for i, entryNode := range sequence.Content {
+		entry, err := resolveAlias(entryNode)
+		if err != nil {
+			return fmt.Errorf("exclusion %d: %w", i+1, err)
+		}
+		if entry.Kind != yaml.MappingNode {
+			return fmt.Errorf("exclusion %d must be a mapping", i+1)
+		}
+
+		seen := make(map[string]struct{}, len(entry.Content)/2)
+		for j := 0; j < len(entry.Content); j += 2 {
+			key := entry.Content[j]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				return fmt.Errorf("exclusion %d mapping keys must be strings", i+1)
+			}
+			switch key.Value {
+			case "name", "when":
+			default:
+				return fmt.Errorf("exclusion %d contains unknown key %q", i+1, key.Value)
+			}
+			if _, duplicate := seen[key.Value]; duplicate {
+				return fmt.Errorf("exclusion %d contains duplicate key %q", i+1, key.Value)
+			}
+			seen[key.Value] = struct{}{}
+		}
 	}
 	return nil
 }
 
-// IsExcluded checks if a given result matches any exclusion rule.
-// Returns true if excluded, otherwise false.
-func (e *Excluder) IsExcluded(result map[string]string) bool {
-	for _, rule := range e.rules {
-		if evaluateConditionGroup(rule.Conditions, result) {
-			return true
+func resolveAlias(node *yaml.Node) (*yaml.Node, error) {
+	seen := map[*yaml.Node]struct{}{}
+	for node != nil && node.Kind == yaml.AliasNode {
+		if _, duplicate := seen[node]; duplicate {
+			return nil, fmt.Errorf("recursive YAML alias")
 		}
+		seen[node] = struct{}{}
+		node = node.Alias
 	}
-	return false
+	if node == nil {
+		return nil, fmt.Errorf("invalid YAML alias")
+	}
+	return node, nil
 }
 
-// evaluateConditionGroup evaluates a group of conditions ("And" or "Or") against the result.
-func evaluateConditionGroup(group ConditionGroup, result map[string]string) bool {
-	if len(group.And) > 0 {
-		for _, cond := range group.And {
-			if !evaluateCondition(cond, result) {
-				return false
-			}
-		}
-		return true
+func requireEOF(decoder *yaml.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); err == io.EOF {
+		return nil
+	} else if err != nil {
+		return decodeError(err)
 	}
-
-	if len(group.Or) > 0 {
-		for _, cond := range group.Or {
-			if evaluateCondition(cond, result) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// No conditions defined; default to not excluded
-	return false
+	return decodeError(fmt.Errorf("multiple YAML documents are not supported"))
 }
 
-// evaluateCondition evaluates a single condition against the result.
-func evaluateCondition(cond Condition, result map[string]string) bool {
-	value, exists := result[cond.Field]
-	if !exists {
-		return false
-	}
+func decodeError(err error) error {
+	return fmt.Errorf("failed to decode exclusions YAML: %w", err)
+}
 
-	switch cond.Operator {
-	case "equals":
-		return value == cond.Value
-	case "not_equals":
-		return value != cond.Value
-	case "contains":
-		return strings.Contains(value, cond.Value)
-	case "regex":
-		matched, err := regexp.MatchString(cond.Value, value)
-		if err != nil {
-			// Log the error if necessary; for now, treat as non-matching
-			return false
-		}
-		return matched
-	case "in":
-		for _, v := range cond.Values {
-			if value == v {
-				return true
-			}
-		}
-		return false
-	case "not_in":
-		for _, v := range cond.Values {
-			if value == v {
-				return false
-			}
-		}
-		return true
-	default:
-		// Unsupported operator; treat as non-matching
-		return false
+func openRegularFile(path string) (*os.File, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat exclusions file %q: %w", path, err)
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("exclusions file %q must be a regular file", path)
+	}
+	file, err := os.Open(path) // #nosec G304 -- the rule explicitly selects its exclusion file.
+	if err != nil {
+		return nil, fmt.Errorf("open exclusions file %q: %w", path, err)
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("inspect exclusions file %q: %w", path, err)
+	}
+	if !openedInfo.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("exclusions file %q changed and is no longer a regular file", path)
+	}
+	return file, nil
 }

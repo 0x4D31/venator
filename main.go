@@ -2,131 +2,414 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
 
-	"github.com/alexflint/go-arg"
+	"github.com/0x4D31/venator/connector"
+	"github.com/0x4D31/venator/internal/config"
+	"github.com/0x4D31/venator/internal/engine"
+	"github.com/0x4D31/venator/internal/llm"
+	"github.com/0x4D31/venator/internal/llm/provider"
+	"github.com/0x4D31/venator/internal/model"
 	"github.com/sirupsen/logrus"
-
-	"github.com/nianticlabs/venator/connector"
-	"github.com/nianticlabs/venator/internal/config"
-	"github.com/nianticlabs/venator/internal/exclusion"
-	"github.com/nianticlabs/venator/internal/llm"
-	llmconfig "github.com/nianticlabs/venator/internal/llm/config"
-	"github.com/nianticlabs/venator/internal/llm/model"
 )
+
+var version = "0.2.0"
 
 var logger = logrus.StandardLogger()
 
-var args struct {
-	RuleConfigPath   string `arg:"-r,--rule-config,required" help:"Path to the rule configuration file"`
-	GlobalConfigPath string `arg:"-c,--global-config" help:"Path to the global configuration file" default:"config/files/global_config.yaml"`
-	LogLevel         string `arg:"-l,--log-level" help:"Log level" default:"info"`
+func main() { os.Exit(realMain(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
+
+func realMain(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	logger.SetOutput(stderr)
+	logger.SetLevel(logrus.InfoLevel)
+	if len(arguments) == 0 {
+		printUsage(stderr)
+		return 2
+	}
+	command := arguments[0]
+	if command == "--version" || command == "-v" {
+		if rejectUnexpectedArguments(arguments[1:], stderr) {
+			return 2
+		}
+		fmt.Fprintf(stdout, "venator %s\n", version)
+		return 0
+	}
+	if command == "--help" || command == "-h" {
+		if rejectUnexpectedArguments(arguments[1:], stderr) {
+			return 2
+		}
+		printUsage(stdout)
+		return 0
+	}
+	if strings.HasPrefix(command, "-") {
+		command = "run" // v0.1 compatibility
+	} else {
+		arguments = arguments[1:]
+	}
+	switch command {
+	case "run":
+		return runCommand(arguments, stdin, stdout, stderr)
+	case "validate":
+		return validateCommand(arguments, stdout, stderr)
+	case "version":
+		if rejectUnexpectedArguments(arguments, stderr) {
+			return 2
+		}
+		fmt.Fprintf(stdout, "venator %s\n", version)
+		return 0
+	case "help":
+		if len(arguments) > 1 {
+			fmt.Fprintf(stderr, "unexpected arguments: %s\n", strings.Join(arguments[1:], " "))
+			return 2
+		}
+		if len(arguments) == 0 {
+			printUsage(stdout)
+			return 0
+		}
+		switch arguments[0] {
+		case "run", "validate", "version":
+			printCommandUsage(stdout, arguments[0])
+		default:
+			fmt.Fprintf(stderr, "unknown help topic %q\n", arguments[0])
+			return 2
+		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown command %q\n", command)
+		printUsage(stderr)
+		return 2
+	}
 }
 
-func main() {
-	ctx := context.Background()
-	arg.MustParse(&args)
-	setLogLevel(args.LogLevel)
+func rejectUnexpectedArguments(arguments []string, stderr io.Writer) bool {
+	if len(arguments) == 0 {
+		return false
+	}
+	fmt.Fprintf(stderr, "unexpected arguments: %s\n", strings.Join(arguments, " "))
+	return true
+}
 
-	ruleCfg, err := config.ParseRuleConfig(args.RuleConfigPath)
+type commandOptions struct {
+	rulePath   string
+	globalPath string
+	logLevel   string
+	reportFile string
+	force      bool
+}
+
+func parseOptions(arguments []string, includeRunOptions bool) (*commandOptions, error) {
+	fs := flag.NewFlagSet("venator", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	opts := &commandOptions{}
+	fs.StringVar(&opts.rulePath, "rule-config", "", "path to the rule YAML")
+	fs.StringVar(&opts.rulePath, "r", "", "path to the rule YAML")
+	fs.StringVar(&opts.globalPath, "global-config", "", "path to the global YAML")
+	fs.StringVar(&opts.globalPath, "c", "", "path to the global YAML")
+	if includeRunOptions {
+		fs.StringVar(&opts.logLevel, "log-level", "info", "trace, debug, info, warn, error")
+		fs.StringVar(&opts.logLevel, "l", "info", "trace, debug, info, warn, error")
+		fs.StringVar(&opts.reportFile, "report-file", "", "write the JSON run report atomically to this path")
+		fs.BoolVar(&opts.force, "force", false, "run a disabled rule")
+	}
+	if err := fs.Parse(arguments); err != nil {
+		return nil, err
+	}
+	if fs.NArg() != 0 {
+		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if opts.rulePath == "" {
+		return nil, fmt.Errorf("--rule-config is required")
+	}
+	if opts.globalPath == "" {
+		return nil, fmt.Errorf("--global-config is required")
+	}
+	return opts, nil
+}
+
+func runCommand(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	opts, err := parseOptions(arguments, true)
 	if err != nil {
-		logger.Fatalf("error reading rule config: %s", err)
+		if errors.Is(err, flag.ErrHelp) {
+			printCommandUsage(stdout, "run")
+			return 0
+		}
+		printArgumentError(stderr, "run", err)
+		return 2
 	}
-
-	globalCfg, err := config.ParseGlobalConfig(args.GlobalConfigPath)
+	if err := setLogLevel(opts.logLevel); err != nil {
+		fmt.Fprintf(stderr, "invalid log level: %v\n", err)
+		return 2
+	}
+	rule, global, err := loadConfigs(opts.rulePath, opts.globalPath)
 	if err != nil {
-		logger.Fatalf("error reading global config: %s", err)
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
 	}
 
-	connectorRegistry := connector.NewRegistry(ctx, globalCfg)
-
-	qr, err := connectorRegistry.GetQueryRunner(ruleCfg.QueryEngine)
-	if err != nil {
-		logger.Fatalf("error retrieving query runner '%s': %s", ruleCfg.QueryEngine, err)
-	}
-
-	var publishers []connector.Publisher
-	for _, pubName := range ruleCfg.Publishers {
-		pub, err := connectorRegistry.GetPublisher(pubName)
-		if err != nil {
-			logger.Fatalf("error retrieving publisher '%s': %s", pubName, err)
-		}
-		publishers = append(publishers, pub)
-	}
-
-	var excluder *exclusion.Excluder
-	if ruleCfg.ExclusionsPath != "" {
-		excluder, err = exclusion.NewExcluder(ruleCfg.ExclusionsPath)
-		if err != nil {
-			logger.Fatalf("error initializing exclusions: %s", err)
-		}
-		logger.Infof("Loaded exclusions from %s", ruleCfg.ExclusionsPath)
-	}
-
-	var llmClient model.Client
-	if ruleCfg.LLM != nil && ruleCfg.LLM.Enabled {
-		llmConfig := llmconfig.Config{
-			Provider:    llmconfig.Provider(globalCfg.LLM.Provider),
-			APIKey:      globalCfg.LLM.APIKey,
-			Model:       globalCfg.LLM.Model,
-			ServerURL:   globalCfg.LLM.ServerURL,
-			Temperature: globalCfg.LLM.Temperature,
-		}
-
-		llmClient, err = llm.New(llmConfig)
-		if err != nil {
-			logger.Fatalf("error initializing LLM: %s", err)
-		}
-	}
-
-	parsedResponse, err := qr.Query(ctx, ruleCfg)
-	if err != nil {
-		logger.Fatalf("error running the query: %s", err)
-	}
-
-	if excluder != nil {
-		var filtered []map[string]string
-		for _, result := range parsedResponse {
-			if excluder.IsExcluded(result) {
-				logger.Debugf("Excluded result: %+v", result)
-				continue
-			}
-			filtered = append(filtered, result)
-		}
-		parsedResponse = filtered
-		logger.Infof("After exclusions, %d results remain", len(parsedResponse))
-	}
-
-	if ruleCfg.LLM != nil && ruleCfg.LLM.Enabled {
-		parsedResponse, err = llm.Process(ctx, llmClient, parsedResponse, ruleCfg)
-		if err != nil {
-			logger.Errorf("error processing LLM: %s", err)
+	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(baseCtx, global.Runtime.Timeout.Value())
+	defer cancel()
+	registry := connector.NewRegistry(ctx, global, stdin, stdout)
+	registryClosed := false
+	defer func() {
+		if registryClosed {
 			return
 		}
-		if len(parsedResponse) == 0 {
-			logger.Infof("No results from LLM to publish")
-			return
+		if err := registry.Close(); err != nil {
+			logger.Errorf("close connectors: %v", err)
 		}
-		logger.Infof("LLM processing completed successfully")
+	}()
+	if rule.Enabled || opts.force {
+		if err := registry.PreflightRule(rule); err != nil {
+			fmt.Fprintf(stderr, "invalid connector configuration: %v\n", err)
+			return 2
+		}
+		if err := engine.ValidateExclusions(opts.rulePath, rule); err != nil {
+			fmt.Fprintf(stderr, "invalid exclusion configuration: %v\n", err)
+			return 2
+		}
 	}
 
-	if len(parsedResponse) == 0 {
-		logger.Infof("No results to publish")
-		return
-	}
-
-	for i, pub := range publishers {
-		if err := pub.Publish(ctx, parsedResponse, ruleCfg); err != nil {
-			logger.Errorf("error publishing to '%s': %s", ruleCfg.Publishers[i], err)
+	var review engine.ReviewFunc
+	if (rule.Enabled || opts.force) && rule.LLM != nil && rule.LLM.Enabled {
+		llmSettings := global.LLM
+		resolveErr := config.ResolveEnv(&llmSettings)
+		var client provider.Client
+		var initErr error
+		if resolveErr != nil {
+			initErr = resolveErr
 		} else {
-			logger.Infof("Successfully published to '%s'", ruleCfg.Publishers[i])
+			client, initErr = llm.New(provider.Config{
+				Provider: provider.Provider(llmSettings.Provider), APIKey: llmSettings.APIKey,
+				Model: llmSettings.Model, ServerURL: llmSettings.ServerURL, Temperature: llmSettings.Temperature,
+			})
 		}
+		reviewerName := llmSettings.Provider + "/" + llmSettings.Model
+		review = func(ctx context.Context, findings []model.Finding, cfg *config.RuleConfig) (map[string]model.Review, error) {
+			if initErr != nil {
+				return nil, fmt.Errorf("initialize LLM reviewer: %w", initErr)
+			}
+			return llm.Review(ctx, client, findings, cfg, reviewerName)
+		}
+	}
+
+	report, runErr := engine.Run(ctx, registry, rule, engine.Options{
+		RulePath: opts.rulePath, Force: opts.force, Review: review,
+		MaxRecords: global.Runtime.MaxRecords, MaxBytes: global.Runtime.MaxBytes,
+		ReviewTimeout: global.LLM.Timeout.Value(),
+	})
+	closeErr := registry.Close()
+	registryClosed = true
+	if closeErr != nil {
+		runErr = errors.Join(runErr, fmt.Errorf("close connectors: %w", closeErr))
+		report.Status = "failed"
+		report.Error = runErr.Error()
+	}
+	if opts.reportFile != "" {
+		if err := writeReport(opts.reportFile, report); err != nil {
+			runErr = errors.Join(runErr, err)
+			report.Status = "failed"
+			report.Error = runErr.Error()
+		}
+	}
+	warnings := 0
+	if report.ReviewError != "" {
+		warnings++
+		logger.WithFields(logrus.Fields{"run_id": report.RunID, "rule_id": report.RuleID}).Warnf("LLM review unavailable: %s", report.ReviewError)
+	}
+	for _, receipt := range report.Sinks {
+		if receipt.Error != "" && !receipt.Required {
+			warnings++
+			logger.WithFields(logrus.Fields{"run_id": report.RunID, "sink": receipt.Name}).Warnf("best-effort publisher failed: %s", receipt.Error)
+		}
+	}
+	fields := logrus.Fields{
+		"rule_name": report.RuleName, "rule_id": report.RuleID, "run_id": report.RunID,
+		"status": report.Status, "queried": report.Queried, "matched": report.Matched, "excluded": report.Excluded,
+		"findings": report.Findings, "sinks_attempted": len(report.Sinks), "warnings": warnings,
+		"duration_ms": report.FinishedAt.Sub(report.StartedAt).Milliseconds(),
+	}
+	if opts.force && !rule.Enabled {
+		fields["forced"] = true
+	}
+	entry := logger.WithFields(fields)
+	if runErr != nil {
+		entry.WithError(runErr).Error("rule run failed")
+		return 1
+	}
+	switch {
+	case report.Status == "skipped":
+		entry.WithField("reason", "disabled").Info("rule skipped")
+	case report.Findings == 0:
+		entry.Info("rule run completed with no findings")
+	default:
+		entry.Info("rule run completed with findings")
+	}
+	return 0
+}
+
+func validateCommand(arguments []string, stdout, stderr io.Writer) int {
+	opts, err := parseOptions(arguments, false)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printCommandUsage(stdout, "validate")
+			return 0
+		}
+		printArgumentError(stderr, "validate", err)
+		return 2
+	}
+	rule, global, err := loadConfigs(opts.rulePath, opts.globalPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
+	}
+	registry := connector.NewRegistry(context.Background(), global, strings.NewReader(""), io.Discard)
+	defer func() {
+		if err := registry.Close(); err != nil {
+			logger.Errorf("close connectors after validation: %v", err)
+		}
+	}()
+	if err := registry.ValidateRule(rule); err != nil {
+		fmt.Fprintf(stderr, "invalid connector configuration: %v\n", err)
+		return 2
+	}
+	if err := validateReviewer(rule, global); err != nil {
+		fmt.Fprintf(stderr, "invalid LLM reviewer configuration: %v\n", err)
+		return 2
+	}
+	if err := engine.ValidateExclusions(opts.rulePath, rule); err != nil {
+		fmt.Fprintf(stderr, "invalid exclusion configuration: %v\n", err)
+		return 2
+	}
+	fmt.Fprintln(stdout, "configuration is valid")
+	return 0
+}
+
+func validateReviewer(rule *config.RuleConfig, global *config.GlobalConfig) error {
+	if rule == nil || rule.LLM == nil || !rule.LLM.Enabled {
+		return nil
+	}
+	settings := global.LLM
+	if err := config.ResolveEnv(&settings); err != nil {
+		return err
+	}
+	_, err := llm.New(provider.Config{
+		Provider: provider.Provider(settings.Provider), APIKey: settings.APIKey,
+		Model: settings.Model, ServerURL: settings.ServerURL, Temperature: settings.Temperature,
+	})
+	return err
+}
+
+func loadConfigs(rulePath, globalPath string) (*config.RuleConfig, *config.GlobalConfig, error) {
+	rule, err := config.ParseRuleConfig(rulePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read rule config: %w", err)
+	}
+	global, err := config.ParseGlobalConfig(globalPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read global config: %w", err)
+	}
+	return rule, global, nil
+}
+
+func setLogLevel(level string) error {
+	var parsed logrus.Level
+	switch strings.ToLower(level) {
+	case "trace":
+		parsed = logrus.TraceLevel
+	case "debug":
+		parsed = logrus.DebugLevel
+	case "info":
+		parsed = logrus.InfoLevel
+	case "warn":
+		parsed = logrus.WarnLevel
+	case "error":
+		parsed = logrus.ErrorLevel
+	default:
+		return fmt.Errorf("%q is not one of trace, debug, info, warn, error", level)
+	}
+	logger.SetLevel(parsed)
+	return nil
+}
+
+func writeReport(path string, report model.RunReport) error {
+	encoded, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode run report: %w", err)
+	}
+	dir := filepath.Dir(path)
+	temp, err := os.CreateTemp(dir, ".venator-report-*")
+	if err != nil {
+		return fmt.Errorf("create temporary run report: %w", err)
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("secure run report: %w", err)
+	}
+	if _, err := temp.Write(append(encoded, '\n')); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("write run report: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("sync run report: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close run report: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace run report: %w", err)
+	}
+	return nil
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "  venator run --global-config GLOBAL.yaml --rule-config RULE.yaml")
+	fmt.Fprintln(w, "  venator validate --global-config GLOBAL.yaml --rule-config RULE.yaml")
+	fmt.Fprintln(w, "  venator version")
+	fmt.Fprintln(w, "\nRun 'venator help <command>' for command options.")
+	fmt.Fprintln(w, "Legacy v0.1 flags without the 'run' command remain supported.")
+}
+
+func printCommandUsage(w io.Writer, command string) {
+	switch command {
+	case "run":
+		fmt.Fprintln(w, "usage:")
+		fmt.Fprintln(w, "  venator run --global-config GLOBAL.yaml --rule-config RULE.yaml [options]")
+		fmt.Fprintln(w, "\noptions:")
+		fmt.Fprintln(w, "  -r, --rule-config FILE     one rule YAML (required)")
+		fmt.Fprintln(w, "  -c, --global-config FILE   global connector/runtime YAML (required)")
+		fmt.Fprintln(w, "  -l, --log-level LEVEL      trace, debug, info, warn, or error (default info)")
+		fmt.Fprintln(w, "      --report-file PATH     atomically write the JSON run report")
+		fmt.Fprintln(w, "      --force                run a disabled rule")
+		fmt.Fprintln(w, "  -h, --help                 show this help")
+	case "validate":
+		fmt.Fprintln(w, "usage:")
+		fmt.Fprintln(w, "  venator validate --global-config GLOBAL.yaml --rule-config RULE.yaml")
+		fmt.Fprintln(w, "\noptions:")
+		fmt.Fprintln(w, "  -r, --rule-config FILE     one rule YAML (required)")
+		fmt.Fprintln(w, "  -c, --global-config FILE   global connector/runtime YAML (required)")
+		fmt.Fprintln(w, "  -h, --help                 show this help")
+	case "version":
+		fmt.Fprintln(w, "usage:")
+		fmt.Fprintln(w, "  venator version")
 	}
 }
 
-func setLogLevel(level string) {
-	lvl, err := logrus.ParseLevel(level)
-	if err != nil {
-		logger.Fatalf("error parsing log level: %s", err)
-	}
-	logger.SetLevel(lvl)
+func printArgumentError(w io.Writer, command string, err error) {
+	fmt.Fprintf(w, "invalid arguments: %v\n", err)
+	fmt.Fprintf(w, "Run 'venator %s --help' for usage.\n", command)
 }

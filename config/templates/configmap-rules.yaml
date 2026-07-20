@@ -1,11 +1,46 @@
-{{ range $path, $_ :=  .Files.Glob  "rules/**.yaml" }}
-{{ $cfg := $.Files.Get $path | fromYaml }}
+{{- $ruleNames := dict }}
+{{- $ruleUIDs := dict }}
+{{- range $path, $_ := .Files.Glob "rules/**.yaml" }}
+{{- $cfg := $.Files.Get $path | fromYaml }}
+{{- if or (not (kindIs "string" $cfg.name)) (gt (len $cfg.name) 52) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $cfg.name)) }}
+{{- fail (printf "rule in %s has name %q; Helm rule names must be DNS-1123 labels of at most 52 characters" $path $cfg.name) }}
+{{- end }}
+{{- if eq $cfg.name "global" }}
+{{- fail (printf "rule in %s uses reserved name %q because its ConfigMap would collide with global-config" $path $cfg.name) }}
+{{- end }}
+{{- if hasKey $ruleNames $cfg.name }}
+{{- fail (printf "rules %s and %s use duplicate name %q" (get $ruleNames $cfg.name) $path $cfg.name) }}
+{{- end }}
+{{- $_ := set $ruleNames $cfg.name $path }}
+{{- if or (not (kindIs "string" $cfg.uid)) (eq (trim $cfg.uid) "") }}
+{{- fail (printf "rule in %s uid must be a non-empty string" $path) }}
+{{- end }}
+{{- if and (hasKey $cfg "enabled") (not (kindIs "bool" $cfg.enabled)) }}
+{{- fail (printf "rule %s enabled must be a boolean" $cfg.name) }}
+{{- end }}
+{{- if eq $cfg.enabled true }}
+{{- if hasKey $ruleUIDs $cfg.uid }}
+{{- fail (printf "rules %s and %s use duplicate uid %q" (get $ruleUIDs $cfg.uid) $path $cfg.uid) }}
+{{- end }}
+{{- $_ := set $ruleUIDs $cfg.uid $path }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $cfg.name }}-config
+  name: {{ printf "%s-config" $cfg.name | quote }}
+  labels:
+    app.kubernetes.io/name: venator
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+    venator.io/rule: {{ $cfg.name | quote }}
 data:
-  {{ $cfg.name }}.yaml: |- 
+  {{ printf "%s.yaml" $cfg.name | quote }}: |-
 {{ $.Files.Get $path | indent 4 }}
-  {{ end }}
+{{- end }}
+{{- range $valueName := list "ruleServiceAccounts" "ruleSecretEnv" "ruleEnvFrom" "ruleExtraVolumes" "ruleExtraVolumeMounts" }}
+{{- range $ruleName, $_ := get $.Values $valueName }}
+{{- if not (hasKey $ruleNames $ruleName) }}
+{{- fail (printf "%s contains unknown packaged rule name %q" $valueName $ruleName) }}
+{{- end }}
+{{- end }}
+{{- end }}

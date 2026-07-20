@@ -1,9 +1,68 @@
-replicaCount: 1
+container:
+  name: venator
+  image: ghcr.io/0x4d31/venator:v0.2.0
+  imagePullPolicy: IfNotPresent
 
 imagePullSecrets: []
-nameOverride: ""
-fullnameOverride: ""
 
-container:
-  name: venator-container
-  image: us-central1-docker.pkg.dev/example-project/venator-repo/venator-image:latest
+cronJob:
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  activeDeadlineSeconds: 1800
+  backoffLimit: 2
+  # null preserves completed Jobs for the CronJob history limits and GKE UI.
+  ttlSecondsAfterFinished: null
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 10
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+secretEnv: []
+
+# Add credentials only to named rules for per-rule isolation.
+ruleSecretEnv: {}
+
+# Existing Secrets can expose connector-specific variables without chart edits.
+envFrom: []
+ruleEnvFrom: {}
+
+extraEnv: []
+
+# Mount CA bundles, mTLS client certificates, or other connector-owned files.
+# Use the per-rule maps to keep credentials out of unrelated CronJobs.
+extraVolumes: []
+extraVolumeMounts: []
+ruleExtraVolumes: {}
+ruleExtraVolumeMounts: {}
+
+podAnnotations: {}
+
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# Optional per-rule KSA overrides, keyed by rule name.
+ruleServiceAccounts: {}

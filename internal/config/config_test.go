@@ -1,12 +1,15 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/0x4D31/venator/internal/config"
 	"github.com/google/go-cmp/cmp"
-	"github.com/nianticlabs/venator/internal/config"
 )
 
 const (
@@ -26,21 +29,18 @@ func TestParseRuleConfig(t *testing.T) {
 		wantCfg     *config.RuleConfig
 	}{
 		{
-			// Test parsing of an existing, valid config file.
 			name:        "ExistentConfig",
 			filePath:    existentConfigPath,
 			expectedErr: "",
-			wantCfg:     MakeRuleConfig(),
+			wantCfg:     makeRuleConfig(),
 		},
 		{
-			// Test parsing of a non-existent config file.
 			name:        "NonExistentConfig",
 			filePath:    nonExistentConfigPath,
 			expectedErr: "failed to open config file",
 			wantCfg:     nil,
 		},
 		{
-			// Test parsing of a config file with invalid YAML (unexpected fields).
 			name:        "InvalidYAML",
 			filePath:    invalidConfigPath,
 			expectedErr: "failed to decode config YAML",
@@ -49,9 +49,8 @@ func TestParseRuleConfig(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // Capture range variable
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel() // Enable parallel testing if applicable
+			t.Parallel()
 
 			cfg, err := config.ParseRuleConfig(tt.filePath)
 
@@ -67,7 +66,6 @@ func TestParseRuleConfig(t *testing.T) {
 			}
 
 			if tt.expectedErr == "" && cfg != nil {
-				// Validate parsed fields if parsing was successful.
 				if diff := cmp.Diff(tt.wantCfg, cfg); diff != "" {
 					t.Errorf("ParseConfig() mismatch (-want +got):\n%s", diff)
 				}
@@ -76,8 +74,7 @@ func TestParseRuleConfig(t *testing.T) {
 	}
 }
 
-// MakeRuleConfig constructs the expected Config struct based on testdata/test-config.yaml
-func MakeRuleConfig() *config.RuleConfig {
+func makeRuleConfig() *config.RuleConfig {
 	return &config.RuleConfig{
 		Name:           "test-rule",
 		UID:            "2001416b-bdd3-4a31-af52-3b1933c4f926",
@@ -85,20 +82,20 @@ func MakeRuleConfig() *config.RuleConfig {
 		Confidence:     config.ConfidenceLow,
 		Enabled:        true,
 		Schedule:       "0 */2 * * *",
-		QueryEngine:    "opensearch",
-		ExclusionsPath: "config/exclusions/example-exclusions.yaml",
-		Publishers:     []string{"opensearch", "pubsub"},
+		Source:         "opensearch.dev",
+		ExclusionsFile: "test-exclusions.yaml",
+		Publishers:     []string{"opensearch.dev", "stdout.default"},
 		Language:       "SQL",
 		Query:          "SELECT * FROM logs",
 		Output: config.Output{
 			Format: config.OutputFormatSignal,
 			Fields: []config.OutputField{
 				{
-					Field:  "Field1",
+					Field:  "Message",
 					Source: "f1",
 				},
 				{
-					Field:  "Field2",
+					Field:  "ResourceName",
 					Source: "f2",
 				},
 			},
@@ -131,17 +128,9 @@ func MakeRuleConfig() *config.RuleConfig {
 }
 
 func TestParseGlobalConfig(t *testing.T) {
-	// Set environment variables for testing
-	os.Setenv("OPENSEARCH_DEV_PASSWORD", "dev-secret-password")
-	os.Setenv("OPENSEARCH_PROD_PASSWORD", "prod-secret-password")
-	os.Setenv("LLM_API_KEY", "test-api-key")
-
-	defer func() {
-		// Clean up environment variables after the test
-		os.Unsetenv("OPENSEARCH_DEV_PASSWORD")
-		os.Unsetenv("OPENSEARCH_PROD_PASSWORD")
-		os.Unsetenv("LLM_API_KEY")
-	}()
+	t.Setenv("OPENSEARCH_DEV_PASSWORD", "dev-secret-password")
+	t.Setenv("OPENSEARCH_PROD_PASSWORD", "prod-secret-password")
+	t.Setenv("LLM_API_KEY", "test-api-key")
 
 	tests := []struct {
 		name        string
@@ -170,9 +159,11 @@ func TestParseGlobalConfig(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // Capture range variable
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := config.ParseGlobalConfig(tt.filePath)
+			if err == nil {
+				err = config.ResolveEnv(cfg)
+			}
 
 			if err != nil {
 				if tt.expectedErr == "" {
@@ -186,12 +177,716 @@ func TestParseGlobalConfig(t *testing.T) {
 			}
 
 			if tt.expectedErr == "" && cfg != nil {
-				// Validate parsed fields if parsing was successful.
 				if diff := cmp.Diff(tt.wantCfg, cfg); diff != "" {
 					t.Errorf("ParseGlobalConfig() mismatch (-want +got):\n%s", diff)
 				}
 			}
 		})
+	}
+}
+
+func TestParseGlobalConfigAppliesWebhookDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	contents := `runtime:
+  maxRecords: 50
+  maxBytes: 2097152
+  timeout: 1m
+webhook:
+  instances:
+    agent:
+      url: https://agent.example.test/venator
+      headers:
+        Authorization: Bearer ${AGENT_TOKEN}
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ParseGlobalConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Webhook.Instances["agent"]
+	if got.Timeout.Value() != 20*time.Second || got.MaxAttempts != 3 || got.MaxFindings != 100 || got.MaxPayloadBytes != 1<<20 {
+		t.Fatalf("webhook defaults = %#v", got)
+	}
+	if got.Headers["Authorization"] != "Bearer ${AGENT_TOKEN}" {
+		t.Fatalf("webhook headers = %#v", got.Headers)
+	}
+}
+
+func TestParseGlobalConfigAcceptsCaseInsensitiveWebhookScheme(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	contents := `runtime:
+  maxRecords: 50
+  maxBytes: 2097152
+  timeout: 1m
+webhook:
+  instances:
+    agent:
+      url: HTTPS://agent.example.test/venator
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParseGlobalConfigRejectsNumericDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	contents := "runtime:\n  maxRecords: 50\n  maxBytes: 2097152\n  timeout: 0\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(path); err == nil || !strings.Contains(err.Error(), "duration must be a YAML string") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestParseGlobalConfigRejectsUnsafeWebhookConfiguration(t *testing.T) {
+	tests := []struct {
+		name    string
+		webhook string
+		want    string
+	}{
+		{name: "non-TLS remote URL", webhook: "url: http://agent.example.test/hook", want: "invalid url"},
+		{name: "non-literal loopback URL", webhook: "url: http://localhost:8080/hook", want: "invalid url"},
+		{name: "reserved header", webhook: "url: https://agent.example.test/hook\n      headers: {Webhook-ID: chosen}", want: "invalid or reserved"},
+		{name: "case-duplicate header", webhook: "url: https://agent.example.test/hook\n      headers: {X-Test: one, x-test: two}", want: "different casing"},
+		{name: "invalid signing secret", webhook: "url: https://agent.example.test/hook\n      signingSecret: whsec_not-base64", want: "signingSecret"},
+		{name: "null signing secret", webhook: "url: https://agent.example.test/hook\n      signingSecret: null", want: "signingSecret must be a YAML string"},
+		{name: "null authorization header", webhook: "url: https://agent.example.test/hook\n      headers: {Authorization: null}", want: "Authorization must be a YAML string"},
+		{name: "null attempt limit", webhook: "url: https://agent.example.test/hook\n      maxAttempts: null", want: "maxAttempts must be a YAML integer"},
+		{name: "oversized payload limit", webhook: "url: https://agent.example.test/hook\n      maxPayloadBytes: 10485761", want: "maxPayloadBytes"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "global.yaml")
+			contents := "runtime:\n  maxRecords: 50\n  maxBytes: 16777216\n  timeout: 1m\nwebhook:\n  instances:\n    agent:\n      " + test.webhook + "\n"
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseGlobalConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestConfigParsersRejectMultipleYAMLDocuments(t *testing.T) {
+	dir := t.TempDir()
+	global := filepath.Join(dir, "global.yaml")
+	if err := os.WriteFile(global, []byte("runtime:\n  maxRecords: 10\n---\nruntime:\n  maxRecords: 20\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(global); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("global error = %v", err)
+	}
+	rule := filepath.Join(dir, "rule.yaml")
+	contents := `name: one
+uid: one
+confidence: low
+enabled: false
+source: stdin.default
+publishers: [stdout.default]
+language: CEL
+query: "true"
+output: {format: raw, fields: []}
+---
+name: two
+`
+	if err := os.WriteFile(rule, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseRuleConfig(rule); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("rule error = %v", err)
+	}
+}
+
+func TestConfigParsersRejectYAMLMergeKeys(t *testing.T) {
+	dir := t.TempDir()
+	global := filepath.Join(dir, "global.yaml")
+	globalContents := "defaults: &defaults\n  maxRecords: 10\nruntime:\n  <<: *defaults\n  maxBytes: 1024\n  timeout: 1m\n"
+	if err := os.WriteFile(global, []byte(globalContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(global); err == nil || !strings.Contains(err.Error(), "YAML merge keys are not supported") {
+		t.Fatalf("global error = %v", err)
+	}
+
+	rule := filepath.Join(dir, "rule.yaml")
+	ruleContents := `defaults: &defaults
+  schedule: 123
+  identity:
+    fields: [record_id, 123]
+<<: *defaults
+name: merged
+uid: merged
+confidence: low
+enabled: false
+source: stdin.default
+publishers: [stdout.default]
+language: CEL
+query: "true"
+output: {format: raw, fields: []}
+`
+	if err := os.WriteFile(rule, []byte(ruleContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseRuleConfig(rule); err == nil || !strings.Contains(err.Error(), "YAML merge keys are not supported") {
+		t.Fatalf("rule error = %v", err)
+	}
+}
+
+func TestParseRuleConfigRejectsAliasMappingKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{name: "top level", contents: `description: &control_key uid
+*control_key: 123
+name: alias-key
+confidence: low
+enabled: false
+source: stdin.default
+publishers: [stdout.default]
+language: CEL
+query: "true"
+output: {format: raw, fields: []}
+`},
+		{name: "nested identity", contents: `description: &control_key fields
+name: alias-key
+uid: alias-key
+confidence: low
+enabled: false
+source: stdin.default
+publishers: [stdout.default]
+language: CEL
+query: "true"
+identity:
+  *control_key: [123]
+output: {format: raw, fields: []}
+`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rule.yaml")
+			if err := os.WriteFile(path, []byte(tt.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), "aliases are not supported as mapping keys") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestParseRuleConfigRejectsInvalidControlFieldTypes(t *testing.T) {
+	base, err := os.ReadFile(existentConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name        string
+		old         string
+		replacement string
+		want        string
+	}{
+		{name: "null enabled", old: "enabled: true", replacement: "enabled: null", want: "enabled must be a YAML boolean"},
+		{name: "numeric name", old: "name: test-rule", replacement: "name: 123", want: "name must be a YAML string"},
+		{name: "numeric uid", old: "uid: 2001416b-bdd3-4a31-af52-3b1933c4f926", replacement: "uid: 123", want: "uid must be a YAML string"},
+		{name: "boolean exclusions path", old: "exclusionsFile: test-exclusions.yaml", replacement: "exclusionsFile: true", want: "exclusionsFile must be a YAML string"},
+		{name: "boolean query", old: "query: SELECT * FROM logs", replacement: "query: true", want: "query must be a YAML string"},
+		{name: "null source", old: "source: opensearch.dev", replacement: "source: null", want: "source must be a YAML string"},
+		{name: "null schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: null", want: "schedule must be a YAML string"},
+		{name: "numeric schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: 5", want: "schedule must be a YAML string"},
+		{name: "boolean schedule", old: "schedule: \"0 */2 * * *\"", replacement: "schedule: true", want: "schedule must be a YAML string"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			contents := strings.Replace(string(base), tt.old, tt.replacement, 1)
+			if contents == string(base) {
+				t.Fatalf("fixture does not contain %q", tt.old)
+			}
+			path := filepath.Join(t.TempDir(), "rule.yaml")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseRuleConfigRejectsLegacyDetectionKeys(t *testing.T) {
+	base, err := os.ReadFile(existentConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name        string
+		old         string
+		replacement string
+		legacyKey   string
+	}{
+		{name: "query engine", old: "source: opensearch.dev", replacement: "queryEngine: opensearch.dev", legacyKey: "queryEngine"},
+		{name: "expression", old: "language: SQL", replacement: "expr: true\nlanguage: SQL", legacyKey: "expr"},
+		{name: "exclusions path", old: "exclusionsFile: test-exclusions.yaml", replacement: "exclusionsPath: test-exclusions.yaml", legacyKey: "exclusionsPath"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			contents := strings.Replace(string(base), test.old, test.replacement, 1)
+			path := filepath.Join(t.TempDir(), "rule.yaml")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), test.legacyKey) {
+				t.Fatalf("ParseRuleConfig() error = %v, want legacy key %q", err, test.legacyKey)
+			}
+		})
+	}
+}
+
+func TestParseRuleConfigRejectsCoercedReviewPolicy(t *testing.T) {
+	tests := []struct {
+		name  string
+		block string
+		want  string
+	}{
+		{name: "null enabled", block: "enabled: null\n    prompt: review", want: "llm.enabled must be a YAML boolean"},
+		{name: "null required", block: "enabled: true\n    required: null\n    prompt: review", want: "llm.required must be a YAML boolean"},
+		{name: "null evidence allowlist", block: "enabled: true\n    evidenceFields: null\n    prompt: review", want: "llm.evidenceFields must be a YAML sequence"},
+		{name: "null redaction list", block: "enabled: true\n    redactFields: null\n    prompt: review", want: "llm.redactFields must be a YAML sequence"},
+		{name: "numeric prompt", block: "enabled: true\n    prompt: 123", want: "llm.prompt must be a YAML string"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rule.yaml")
+			contents := `name: strict-review
+uid: strict-review
+confidence: high
+enabled: true
+source: stdin.default
+language: CEL
+query: "true"
+publishers: [stdout.default]
+output: {format: raw, fields: []}
+llm:
+    ` + test.block + "\n"
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestConfigParsersRejectNonRegularFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config-dir")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(path); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("global error = %v", err)
+	}
+	if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("rule error = %v", err)
+	}
+}
+
+func TestResolveEnvAfterDecodePreservesSecretCharacters(t *testing.T) {
+	t.Setenv("SLACK_WEBHOOK", "https://hooks.slack.test/services/a # b\nnot-yaml: true")
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	if err := os.WriteFile(path, []byte("slack:\n  instances:\n    alerts:\n      webhookURL: ${SLACK_WEBHOOK}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ParseGlobalConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := cfg.Slack.Instances["alerts"]
+	if err := config.ResolveEnv(&instance); err != nil {
+		t.Fatal(err)
+	}
+	if instance.WebhookURL != os.Getenv("SLACK_WEBHOOK") {
+		t.Fatalf("webhook = %q", instance.WebhookURL)
+	}
+}
+
+func TestResolveEnvExpandsOnlyBracedReferences(t *testing.T) {
+	t.Setenv("TOKEN", "resolved")
+	value := struct {
+		Braced string
+		Bare   string
+		Dollar string
+	}{
+		Braced: "prefix-${TOKEN}-suffix",
+		Bare:   "$TOKEN",
+		Dollar: "$2a$literal-secret",
+	}
+	if err := config.ResolveEnv(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Braced != "prefix-resolved-suffix" {
+		t.Fatalf("braced reference = %q", value.Braced)
+	}
+	if value.Bare != "$TOKEN" || value.Dollar != "$2a$literal-secret" {
+		t.Fatalf("literal dollar values changed: %#v", value)
+	}
+}
+
+func TestResolveEnvRetainsMissingReferenceForRetry(t *testing.T) {
+	value := struct{ Token string }{Token: "${LATER_TOKEN}"}
+	if err := config.ResolveEnv(&value); err == nil || !strings.Contains(err.Error(), "LATER_TOKEN") {
+		t.Fatalf("error = %v", err)
+	}
+	if value.Token != "${LATER_TOKEN}" {
+		t.Fatalf("missing reference was destroyed: %q", value.Token)
+	}
+	t.Setenv("LATER_TOKEN", "available")
+	if err := config.ResolveEnv(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Token != "available" {
+		t.Fatalf("token = %q", value.Token)
+	}
+}
+
+func TestResolveEnvRejectsMalformedReferencesWithoutPartialExpansion(t *testing.T) {
+	t.Setenv("TOKEN", "resolved")
+	value := struct {
+		Valid     string
+		Malformed string
+	}{Valid: "${TOKEN}", Malformed: "${TOKEN-NAME}"}
+	if err := config.ResolveEnv(&value); err == nil || !strings.Contains(err.Error(), "malformed environment reference") {
+		t.Fatalf("error = %v", err)
+	}
+	if value.Valid != "${TOKEN}" {
+		t.Fatalf("valid reference was partially expanded: %#v", value)
+	}
+}
+
+func TestResolveEnvDoesNotInterpretExpansionValues(t *testing.T) {
+	t.Setenv("TOKEN", "literal-${NOT_A_REFERENCE}")
+	value := struct{ Token string }{Token: "${TOKEN}"}
+	if err := config.ResolveEnv(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Token != "literal-${NOT_A_REFERENCE}" {
+		t.Fatalf("token = %q", value.Token)
+	}
+}
+
+func TestResolveEnvRequiresPointer(t *testing.T) {
+	if err := config.ResolveEnv(struct{ Token string }{Token: "${TOKEN}"}); err == nil || !strings.Contains(err.Error(), "non-nil pointer") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveEnvRejectsBlankCloudIdentifiers(t *testing.T) {
+	t.Setenv("BLANK_CLOUD_ID", " \t")
+	tests := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{
+			name:  "PubSub project",
+			value: &config.PubSubConfig{ProjectID: "${BLANK_CLOUD_ID}", TopicID: "findings"},
+			want:  "projectID and topicID",
+		},
+		{
+			name: "BigQuery dataset",
+			value: &config.BigQueryConfig{
+				ProjectID: "project", DatasetID: "${BLANK_CLOUD_ID}", TableID: "findings",
+			},
+			want: "datasetID cannot be blank",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := config.ResolveEnv(test.value); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestNDJSONPathResolvesRelativeToGlobalConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "global.yaml")
+	contents := `ndjson:
+  instances:
+    events:
+      path: events.ndjson
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	global, err := config.ParseGlobalConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := global.NDJSON.Instances["events"].ResolvePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != filepath.Join(dir, "events.ndjson") {
+		t.Fatalf("path = %q", resolved)
+	}
+}
+
+func TestNDJSONPathInterpolatesLazilyBeforeResolution(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "global.yaml")
+	contents := `ndjson:
+  instances:
+    events:
+      path: ${VENATOR_TEST_NDJSON_PATH}
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Unsetenv("VENATOR_TEST_NDJSON_PATH")
+	global, err := config.ParseGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("unused unset profile blocked global parsing: %v", err)
+	}
+	profile := global.NDJSON.Instances["events"]
+	if _, err := profile.ResolvePath(); err == nil || !strings.Contains(err.Error(), "VENATOR_TEST_NDJSON_PATH") {
+		t.Fatalf("ResolvePath() error = %v", err)
+	}
+
+	t.Setenv("VENATOR_TEST_NDJSON_PATH", filepath.Join("snapshots", "events.ndjson"))
+	resolved, err := profile.ResolvePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "snapshots", "events.ndjson"); resolved != want {
+		t.Fatalf("relative path = %q, want %q", resolved, want)
+	}
+
+	absolute := filepath.Join(t.TempDir(), "events.ndjson")
+	t.Setenv("VENATOR_TEST_NDJSON_PATH", absolute)
+	resolved, err = profile.ResolvePath()
+	if err != nil || resolved != absolute {
+		t.Fatalf("absolute path = %q, %v", resolved, err)
+	}
+}
+
+func TestGlobalConfigRejectsAmbiguousNDJSONPaths(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "blank", path: " ", want: "requires path"},
+		{name: "padded", path: " events.ndjson ", want: "leading or trailing whitespace"},
+		{name: "glob", path: "events-*.ndjson", want: "not a glob"},
+		{name: "home shorthand", path: "~/events.ndjson", want: "use ${HOME}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := makeGlobalConfig()
+			cfg.NDJSON.Instances = map[string]config.NDJSONConfig{"events": {Path: test.path}}
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRuleConfigValidatesBuiltInSourceLanguages(t *testing.T) {
+	tests := []struct {
+		name      string
+		source    string
+		language  string
+		query     string
+		wantError string
+	}{
+		{name: "BigQuery SQL", source: "bigquery.prod", language: "sql", query: "SELECT 1"},
+		{name: "ClickHouse SQL", source: "clickhouse.home", language: "SQL", query: "SELECT 1"},
+		{name: "OpenSearch PPL", source: "opensearch.logs", language: "ppl", query: "source=logs"},
+		{name: "OpenSearch rejects EQL", source: "opensearch.logs", language: "EQL", query: "process where true", wantError: "SQL or PPL"},
+		{name: "NDJSON CEL", source: "ndjson.events", language: "cel", query: `has(event.kind)`},
+		{name: "NDJSON rejects format as language", source: "ndjson.events", language: "NDJSON", query: `true`, wantError: "requires language CEL"},
+		{name: "stdin CEL", source: "stdin.default", language: "CEL", query: `true`},
+		{name: "stdin requires query", source: "stdin.default", language: "CEL", wantError: "query is required"},
+		{name: "custom source language remains extensible", source: "custom.source", language: "CEL", query: "event.kind == 'alert'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rule := *makeRuleConfig()
+			rule.Source = tt.source
+			rule.Language = tt.language
+			rule.Query = tt.query
+			err := rule.Validate()
+			if tt.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestRuleConfigRejectsPaddedIdentifiers(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*config.RuleConfig)
+		want   string
+	}{
+		{name: "name", mutate: func(rule *config.RuleConfig) { rule.Name = " test-rule" }, want: "name must not have"},
+		{name: "uid", mutate: func(rule *config.RuleConfig) { rule.UID = "test-rule " }, want: "uid must not have"},
+		{name: "source", mutate: func(rule *config.RuleConfig) { rule.Source = " stdin.default" }, want: "source must not have"},
+		{name: "publisher", mutate: func(rule *config.RuleConfig) { rule.Publishers = []string{"stdout.default "} }, want: "publisher"},
+		{name: "best-effort publisher", mutate: func(rule *config.RuleConfig) {
+			rule.Publishers = nil
+			rule.BestEffortPublishers = []string{" stdout.default"}
+		}, want: "publisher"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule := makeRuleConfig()
+			test.mutate(rule)
+			if err := rule.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRuleConfigValidatesCELQuery(t *testing.T) {
+	tests := []struct {
+		name      string
+		source    string
+		language  string
+		query     string
+		wantError string
+	}{
+		{name: "stdin", source: "stdin.default", language: "CEL", query: `event.severity >= 4`},
+		{name: "NDJSON", source: "ndjson.events", language: "CEL", query: `has(event.kind)`},
+		{name: "empty", source: "stdin.default", language: "CEL", query: " \n\t", wantError: "query is required"},
+		{name: "invalid", source: "stdin.default", language: "CEL", query: `event.kind ==`, wantError: "invalid CEL query"},
+		{name: "non-boolean", source: "stdin.default", language: "CEL", query: `event.kind`, wantError: "must return bool"},
+		{name: "custom CEL", source: "custom.source", language: "CEL", query: `true`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule := *makeRuleConfig()
+			rule.Source = test.source
+			rule.Language = test.language
+			rule.Query = test.query
+			err := rule.Validate()
+			if test.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestRuleConfigValidatesIdentity(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity *config.Identity
+		wantErr  string
+	}{
+		{name: "omitted"},
+		{name: "one field", identity: &config.Identity{Fields: []string{"record_id"}}},
+		{name: "literal dotted field", identity: &config.Identity{Fields: []string{"event.id"}}},
+		{name: "no fields", identity: &config.Identity{}, wantErr: "identity.fields must contain at least one field"},
+		{name: "empty field", identity: &config.Identity{Fields: []string{"record_id", " "}}, wantErr: "identity.fields cannot contain an empty field"},
+		{name: "duplicate field", identity: &config.Identity{Fields: []string{"record_id", "record_id"}}, wantErr: `identity.fields contains duplicate field "record_id"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule := makeRuleConfig()
+			rule.Identity = test.identity
+			err := rule.Validate()
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("Validate() error = %v, want error containing %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseRuleConfigIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rule.yaml")
+	contents := `name: local finding
+uid: local-finding
+confidence: high
+enabled: true
+source: stdin.default
+language: CEL
+query: "true"
+publishers: [stdout.default]
+identity:
+  fields: [record_id, event.id]
+output:
+  format: raw
+  fields: []
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rule, err := config.ParseRuleConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"record_id", "event.id"}
+	if rule.Identity == nil || !cmp.Equal(rule.Identity.Fields, want) {
+		t.Fatalf("identity = %#v, want %#v", rule.Identity, want)
+	}
+}
+
+func TestParseRuleConfigRejectsNonStringIdentityFields(t *testing.T) {
+	for _, value := range []string{"true", "123", "null"} {
+		t.Run(value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rule.yaml")
+			contents := fmt.Sprintf(`name: local finding
+uid: local-finding
+confidence: high
+enabled: true
+source: stdin.default
+language: CEL
+query: "true"
+publishers: [stdout.default]
+identity:
+  fields: [record_id, %s]
+output:
+  format: raw
+  fields: []
+`, value)
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), "must be a YAML string") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRuleConfigRequiresRedactionsWithinEvidenceAllowlist(t *testing.T) {
+	rule := makeRuleConfig()
+	rule.LLM.EvidenceFields = []string{"event", "host"}
+	rule.LLM.RedactFields = []string{"token"}
+	if err := rule.Validate(); err == nil || !strings.Contains(err.Error(), "must also appear in llm.evidenceFields") {
+		t.Fatalf("error = %v", err)
+	}
+
+	rule.LLM.RedactFields = []string{"host"}
+	if err := rule.Validate(); err != nil {
+		t.Fatalf("valid redaction subset rejected: %v", err)
 	}
 }
 
@@ -202,23 +897,286 @@ func makeGlobalConfig() *config.GlobalConfig {
 				"dev": {
 					URL:                "https://opensearch-instance1.example.com:9200",
 					Username:           "admin1",
-					Password:           "dev-secret-password", // Expect the expanded value from the envVar
+					Password:           "dev-secret-password",
+					Index:              "venator-findings-v1",
+					SQLFetchSize:       1_000,
 					InsecureSkipVerify: false,
 				},
 				"prod": {
 					URL:                "https://opensearch-instance2.example.com:9200",
 					Username:           "admin2",
-					Password:           "prod-secret-password", // Expect the expanded value from the envVar
+					Password:           "prod-secret-password",
+					Index:              "venator-findings-v1",
 					InsecureSkipVerify: true,
 				},
 			},
 		},
 		LLM: config.LLMConfig{
 			Provider:    "openai",
-			APIKey:      "test-api-key", // Expect the expanded value from the envVar
-			Model:       "gpt-4o",
+			APIKey:      "test-api-key",
+			Model:       "test-model",
 			ServerURL:   "",
-			Temperature: 0.7,
+			Temperature: float64Pointer(0.7),
+			Timeout:     config.Duration(30 * time.Second),
 		},
+		Runtime: config.RuntimeConfig{MaxRecords: 10_000, MaxBytes: 64 << 20, Timeout: config.Duration(15 * time.Minute)},
+	}
+}
+
+func float64Pointer(value float64) *float64 { return &value }
+
+func TestShippedExamplesParse(t *testing.T) {
+	if _, err := config.ParseGlobalConfig("../../config/files/global_config.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := filepath.Glob("../../config/rules/*/*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) == 0 {
+		t.Fatal("no shipped rules found")
+	}
+	for _, rule := range rules {
+		if _, err := config.ParseRuleConfig(rule); err != nil {
+			t.Fatalf("%s: %v", rule, err)
+		}
+	}
+	t.Setenv("CLICKHOUSE_PASSWORD", "test-only")
+	if _, err := config.ParseGlobalConfig("../../config/examples/clickhouse-global.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseRuleConfig("../../config/examples/clickhouse-rule.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseRuleConfig("../../config/examples/llm-review-rule.yaml"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGlobalConfigRejectsUnsafeClickHouseTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	contents := `clickhouse:
+  instances:
+    sink:
+      addresses: ["localhost:9000"]
+      sink:
+        table: "findings; DROP TABLE logs"
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(path); err == nil {
+		t.Fatal("expected unsafe table error")
+	}
+}
+
+func TestGlobalConfigDefersClickHouseStringReferences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	contents := `clickhouse:
+  instances:
+    dynamic:
+      addresses: ["127.0.0.1:9000"]
+      protocol: ${VENATOR_TEST_CLICKHOUSE_PROTOCOL}
+      compression: ${VENATOR_TEST_CLICKHOUSE_COMPRESSION}
+      sink:
+        table: ${VENATOR_TEST_CLICKHOUSE_DATABASE}.${VENATOR_TEST_CLICKHOUSE_TABLE}
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ParseGlobalConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := cfg.ClickHouse.Instances["dynamic"]
+	if instance.Protocol != "${VENATOR_TEST_CLICKHOUSE_PROTOCOL}" {
+		t.Fatalf("protocol = %q", instance.Protocol)
+	}
+	if instance.Compression != "${VENATOR_TEST_CLICKHOUSE_COMPRESSION}" {
+		t.Fatalf("compression = %q", instance.Compression)
+	}
+	if got := instance.Sink.Table; got != "${VENATOR_TEST_CLICKHOUSE_DATABASE}.${VENATOR_TEST_CLICKHOUSE_TABLE}" {
+		t.Fatalf("sink.table = %q", got)
+	}
+}
+
+func TestGlobalConfigRejectsClickHouseRowsAboveRuntimeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	contents := `runtime:
+  maxRecords: 10
+clickhouse:
+  instances:
+    source:
+      addresses: ["localhost:9000"]
+      query:
+        maxRows: 11
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(path); err == nil || !strings.Contains(err.Error(), "cannot exceed runtime.maxRecords") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestGlobalConfigRejectsInvalidOpenSearchSQLFetchSize(t *testing.T) {
+	tests := []struct {
+		name      string
+		fetchSize int
+		want      string
+	}{
+		{name: "negative", fetchSize: -1, want: "cannot be negative"},
+		{name: "above runtime limit", fetchSize: 10_001, want: "cannot exceed runtime.maxRecords"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := makeGlobalConfig()
+			instance := cfg.OpenSearch.Instances["dev"]
+			instance.SQLFetchSize = test.fetchSize
+			cfg.OpenSearch.Instances["dev"] = instance
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestGlobalConfigRejectsNegativeRuntimeLimits(t *testing.T) {
+	tests := []struct {
+		name    string
+		setting string
+		want    string
+	}{
+		{name: "records", setting: "maxRecords: -1", want: "runtime.maxRecords must be positive"},
+		{name: "bytes", setting: "maxBytes: -1", want: "runtime.maxBytes must be positive"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "global.yaml")
+			contents := "runtime:\n  " + test.setting + "\nclickhouse:\n  instances:\n    source:\n" +
+				"      addresses: [\"localhost:9000\"]\n      query: {}\n"
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseGlobalConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestGlobalConfigRejectsNonFiniteLLMTemperature(t *testing.T) {
+	for _, temperature := range []string{".nan", ".inf", "-.inf"} {
+		t.Run(temperature, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "global.yaml")
+			contents := "llm:\n  temperature: " + temperature + "\n"
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseGlobalConfig(path); err == nil || !strings.Contains(err.Error(), "temperature must be between 0 and 2") {
+				t.Fatalf("temperature %s: error = %v", temperature, err)
+			}
+		})
+	}
+}
+
+func TestParseGlobalConfigRejectsMalformedEnvironmentReference(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	if err := os.WriteFile(path, []byte("llm:\n  apiKey: ${API-KEY}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseGlobalConfig(path); err == nil || !strings.Contains(err.Error(), "malformed environment reference") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestGlobalConfigRejectsInvalidConnectorInstanceNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*config.GlobalConfig)
+	}{
+		{name: "OpenSearch", configure: func(cfg *config.GlobalConfig) {
+			cfg.OpenSearch.Instances = map[string]config.OpenSearchConfig{"bad.name": {}}
+		}},
+		{name: "PubSub", configure: func(cfg *config.GlobalConfig) { cfg.PubSub.Instances = map[string]config.PubSubConfig{"bad.name": {}} }},
+		{name: "BigQuery", configure: func(cfg *config.GlobalConfig) {
+			cfg.BigQuery.Instances = map[string]config.BigQueryConfig{"bad.name": {}}
+		}},
+		{name: "Slack", configure: func(cfg *config.GlobalConfig) { cfg.Slack.Instances = map[string]config.SlackConfig{"bad.name": {}} }},
+		{name: "ClickHouse", configure: func(cfg *config.GlobalConfig) {
+			cfg.ClickHouse.Instances = map[string]config.ClickHouseConfig{"bad.name": {}}
+		}},
+		{name: "NDJSON", configure: func(cfg *config.GlobalConfig) {
+			cfg.NDJSON.Instances = map[string]config.NDJSONConfig{"bad.name": {Path: "events.ndjson"}}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.GlobalConfig{
+				Runtime: config.RuntimeConfig{MaxRecords: 1, MaxBytes: 1, Timeout: config.Duration(time.Second)},
+				LLM:     config.LLMConfig{Timeout: config.Duration(time.Second)},
+			}
+			tt.configure(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "instance name") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestGlobalConfigRejectsBlankCloudIdentifiers(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*config.GlobalConfig)
+		want      string
+	}{
+		{
+			name: "PubSub project",
+			configure: func(cfg *config.GlobalConfig) {
+				cfg.PubSub.Instances = map[string]config.PubSubConfig{"alerts": {ProjectID: " ", TopicID: "findings"}}
+			},
+			want: "requires projectID and topicID",
+		},
+		{
+			name: "PubSub topic",
+			configure: func(cfg *config.GlobalConfig) {
+				cfg.PubSub.Instances = map[string]config.PubSubConfig{"alerts": {ProjectID: "project", TopicID: "\t"}}
+			},
+			want: "requires projectID and topicID",
+		},
+		{
+			name: "BigQuery project",
+			configure: func(cfg *config.GlobalConfig) {
+				cfg.BigQuery.Instances = map[string]config.BigQueryConfig{"warehouse": {ProjectID: " ", MaxBytesBilled: 1}}
+			},
+			want: "requires projectID",
+		},
+		{
+			name: "BigQuery dataset",
+			configure: func(cfg *config.GlobalConfig) {
+				cfg.BigQuery.Instances = map[string]config.BigQueryConfig{
+					"warehouse": {ProjectID: "project", DatasetID: " ", TableID: "findings", MaxBytesBilled: 1},
+				}
+			},
+			want: "datasetID cannot be blank",
+		},
+		{
+			name: "BigQuery table",
+			configure: func(cfg *config.GlobalConfig) {
+				cfg.BigQuery.Instances = map[string]config.BigQueryConfig{
+					"warehouse": {ProjectID: "project", DatasetID: "venator", TableID: " ", MaxBytesBilled: 1},
+				}
+			},
+			want: "tableID cannot be blank",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := makeGlobalConfig()
+			test.configure(cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
 	}
 }

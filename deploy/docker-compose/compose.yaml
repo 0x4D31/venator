@@ -1,0 +1,42 @@
+name: venator
+
+services:
+  venator:
+    profiles: ["run"]
+    image: ${VENATOR_IMAGE:-ghcr.io/0x4d31/venator:v0.2.0}
+    build:
+      context: ../..
+      args:
+        VERSION: 0.2.0
+    command:
+      - run
+      - --global-config
+      - /etc/venator/files/global_config.yaml
+      - --rule-config
+      - /etc/venator/rules/example/single-stage-alert.yaml
+      - --force
+    # List-form entries copy only variables that actually exist in the invoking
+    # environment or Compose .env file. Missing selected secrets therefore stay
+    # unset and Venator can report the unresolved ${NAME} reference clearly.
+    environment:
+      - OPENSEARCH_PASSWORD
+      - SLACK_WEBHOOK_URL
+      - CLICKHOUSE_PASSWORD
+      - OPENAI_API_KEY
+      - OPENAI_MODEL
+      - AGENT_WEBHOOK_URL
+      - AGENT_WEBHOOK_TOKEN
+      - AGENT_WEBHOOK_SECRET
+    volumes:
+      - ${VENATOR_CONFIG_DIR:-../../config}:/etc/venator:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    user: ${VENATOR_UID:-65532}:${VENATOR_GID:-65532}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    stop_grace_period: 30s
+    restart: "no"

@@ -1,68 +1,38 @@
-# Known false positive for test user from internal IP
-- conditions:
-    and:
-      - field: username
-        operator: equals
-        value: "test"
-      - field: ip_address
-        operator: equals
-        value: "192.168.1.1"
+- name: known test user from internal IP
+  when: |
+    "username" in event &&
+    "ip_address" in event &&
+    event.username == "test" &&
+    event.ip_address == "192.168.1.1"
 
-# Excluded based on email domain or internal domain
-- conditions:
-    or:
-      - field: email
-        operator: contains
-        value: "@example.com"
-      - field: domain
-        operator: equals
-        value: "internal.local"
+- name: expected internal domain
+  when: |
+    ("email" in event && event.email.contains("@example.com")) ||
+    ("domain" in event && event.domain == "internal.local")
 
-# Exclude fast responses
-- conditions:
-    and:
-      - field: response_time
-        operator: equals
-        value: "fast"
+- name: expected fast response
+  when: |
+    "response_time" in event && event.response_time == "fast"
 
-# Exclude admin and superuser roles
-- conditions:
-    or:
-      - field: user_role
-        operator: equals
-        value: "admin"
-      - field: user_role
-        operator: equals
-        value: "superuser"
+- name: privileged role
+  when: |
+    "user_role" in event && event.user_role in ["admin", "superuser"]
 
-# Exclude example.com URLs (including subdomains)
-- conditions:
-    or:
-      - field: url
-        operator: regex
-        value: "^https?://(?:[a-z0-9]+\\.)*example\\.com/.*$"
+- name: example.com URL
+  when: |
+    "url" in event &&
+    event.url.matches("^https?://(?:[a-z0-9]+\\.)*example\\.com/.*$")
 
-# Exclude departments in sales or hr
-- conditions:
-    or:
-      - field: department
-        operator: in
-        values:
-          - "sales"
-          - "hr"
+- name: expected department
+  when: |
+    "department" in event && event.department in ["sales", "hr"]
 
-# Exclude status not equals to active
-- conditions:
-    and:
-      - field: status
-        operator: not_equals
-        value: "active"
+- name: inactive status
+  when: |
+    "status" in event && event.status != null && event.status != "active"
 
-# Exclude regions not in list
-- conditions:
-    or:
-      - field: region
-        operator: not_in
-        values:
-          - "us-east-1"
-          - "us-west-2"
+- name: unexpected region
+  when: |
+    "region" in event &&
+    event.region != null &&
+    !(event.region in ["us-east-1", "us-west-2"])

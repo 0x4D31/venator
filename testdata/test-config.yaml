@@ -4,19 +4,19 @@ status: test
 confidence: low
 enabled: true
 schedule: "0 */2 * * *"
-queryEngine: opensearch
-exclusionsPath: config/exclusions/example-exclusions.yaml
+source: opensearch.dev
+exclusionsFile: test-exclusions.yaml
 publishers:
- - opensearch
- - pubsub
+  - opensearch.dev
+  - stdout.default
 language: SQL
 query: SELECT * FROM logs
 output:
   format: signal
   fields:
-    - field: Field1
+    - field: Message
       source: f1
-    - field: Field2
+    - field: ResourceName
       source: f2
 description: this is a test rule.
 references:
@@ -37,7 +37,6 @@ ttps:
     id: T222
     reference: https://example2.com
 
-# LLM Configuration
 llm:
   enabled: true
   prompt: "Prompt template"

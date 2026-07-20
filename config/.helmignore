@@ -1,0 +1,5 @@
+.git/
+.github/
+*.env
+.vcfg.env
+examples/

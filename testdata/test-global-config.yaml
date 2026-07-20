@@ -4,6 +4,7 @@ opensearch:
       url: "https://opensearch-instance1.example.com:9200"
       username: "admin1"
       password: ${OPENSEARCH_DEV_PASSWORD}
+      sqlFetchSize: 1000
       insecureSkipVerify: false
     prod:
       url: "https://opensearch-instance2.example.com:9200"
@@ -13,7 +14,7 @@ opensearch:
 
 llm:
   provider: "openai"
-  model: "gpt-4o"
+  model: "test-model"
   apiKey: ${LLM_API_KEY}
   serverURL: ""
   temperature: 0.7
