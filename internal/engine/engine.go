@@ -138,16 +138,39 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 	detectedAt := now().UTC()
 	findings := make([]model.Finding, 0, len(records))
 	occurrences := make(map[string]int, len(records))
+	identityOwners := make(map[string]identityOwner, len(records))
 	metadata := ruleMetadata(rule)
 	for i, record := range records {
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
+		identity, err := findingIdentity(record, rule.Identity)
+		if err != nil {
+			return report, fmt.Errorf("build finding %d identity: %w", i, err)
+		}
+		if rule.Identity != nil {
+			encodedIdentity, err := json.Marshal(identity)
+			if err != nil {
+				return report, fmt.Errorf("build finding %d identity: %w", i, err)
+			}
+			encodedRecord, err := json.Marshal(record)
+			if err != nil {
+				return report, fmt.Errorf("build finding %d identity: encode source record: %w", i, err)
+			}
+			key := string(encodedIdentity)
+			if owner, exists := identityOwners[key]; exists {
+				if !bytes.Equal(owner.record, encodedRecord) {
+					return report, fmt.Errorf("identity fields do not uniquely identify retained records %d and %d", owner.index, i)
+				}
+			} else {
+				identityOwners[key] = identityOwner{index: i, record: encodedRecord}
+			}
+		}
 		payload, err := signal.BuildOutput(record, rule)
 		if err != nil {
 			return report, fmt.Errorf("build finding %d: %w", i, err)
 		}
-		baseID, err := model.FindingID(rule.UID, record)
+		baseID, err := model.FindingID(rule.UID, identity)
 		if err != nil {
 			return report, fmt.Errorf("build finding %d ID: %w", i, err)
 		}
@@ -155,7 +178,7 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		occurrences[baseID] = occurrence + 1
 		id := baseID
 		if occurrence > 0 {
-			id, err = model.FindingIDForOccurrence(rule.UID, record, occurrence)
+			id, err = model.FindingIDForOccurrence(rule.UID, identity, occurrence)
 			if err != nil {
 				return report, fmt.Errorf("build finding %d occurrence ID: %w", i, err)
 			}
@@ -272,6 +295,26 @@ func Run(ctx context.Context, registry Registry, rule *config.RuleConfig, opts O
 		return report, err
 	}
 	return report, nil
+}
+
+type identityOwner struct {
+	index  int
+	record []byte
+}
+
+func findingIdentity(record model.Record, identity *config.Identity) (model.Record, error) {
+	if identity == nil {
+		return record, nil
+	}
+	projection := make(model.Record, len(identity.Fields))
+	for _, field := range identity.Fields {
+		value, exists := record[field]
+		if !exists {
+			return nil, fmt.Errorf("field %q is missing from source record", field)
+		}
+		projection[field] = value
+	}
+	return projection, nil
 }
 
 func measureFindings(ctx context.Context, findings []model.Finding, maxBytes int64) error {

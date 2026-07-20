@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -433,6 +434,91 @@ func TestRuleConfigValidatesBuiltInSourceLanguages(t *testing.T) {
 			}
 			if tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)) {
 				t.Fatalf("error = %v, want substring %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestRuleConfigValidatesIdentity(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity *config.Identity
+		wantErr  string
+	}{
+		{name: "omitted"},
+		{name: "one field", identity: &config.Identity{Fields: []string{"record_id"}}},
+		{name: "literal dotted field", identity: &config.Identity{Fields: []string{"event.id"}}},
+		{name: "no fields", identity: &config.Identity{}, wantErr: "identity.fields must contain at least one field"},
+		{name: "empty field", identity: &config.Identity{Fields: []string{"record_id", " "}}, wantErr: "identity.fields cannot contain an empty field"},
+		{name: "duplicate field", identity: &config.Identity{Fields: []string{"record_id", "record_id"}}, wantErr: `identity.fields contains duplicate field "record_id"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule := makeRuleConfig()
+			rule.Identity = test.identity
+			err := rule.Validate()
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("Validate() error = %v, want error containing %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseRuleConfigIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rule.yaml")
+	contents := `name: local finding
+uid: local-finding
+confidence: high
+enabled: true
+queryEngine: stdin.default
+language: NDJSON
+query: ""
+publishers: [stdout.default]
+identity:
+  fields: [record_id, event.id]
+output:
+  format: raw
+  fields: []
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rule, err := config.ParseRuleConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"record_id", "event.id"}
+	if rule.Identity == nil || !cmp.Equal(rule.Identity.Fields, want) {
+		t.Fatalf("identity = %#v, want %#v", rule.Identity, want)
+	}
+}
+
+func TestParseRuleConfigRejectsNonStringIdentityFields(t *testing.T) {
+	for _, value := range []string{"true", "123", "null"} {
+		t.Run(value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rule.yaml")
+			contents := fmt.Sprintf(`name: local finding
+uid: local-finding
+confidence: high
+enabled: true
+queryEngine: stdin.default
+language: NDJSON
+query: ""
+publishers: [stdout.default]
+identity:
+  fields: [record_id, %s]
+output:
+  format: raw
+  fields: []
+`, value)
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.ParseRuleConfig(path); err == nil || !strings.Contains(err.Error(), "identity.fields must contain only YAML strings") {
+				t.Fatalf("error = %v", err)
 			}
 		})
 	}

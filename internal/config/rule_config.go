@@ -17,6 +17,7 @@ type RuleConfig struct {
 	Description          string          `yaml:"description"`
 	Enabled              bool            `yaml:"enabled"`
 	ExclusionsPath       string          `yaml:"exclusionsPath,omitempty"`
+	Identity             *Identity       `yaml:"identity,omitempty"`
 	Language             string          `yaml:"language"`
 	LLM                  *LLM            `yaml:"llm,omitempty"`
 	Name                 string          `yaml:"name"`
@@ -31,6 +32,12 @@ type RuleConfig struct {
 	Tags                 []string        `yaml:"tags"`
 	TTPs                 []TTP           `yaml:"ttps"`
 	UID                  string          `yaml:"uid"`
+}
+
+// Identity selects the exact top-level source fields used to derive stable
+// finding IDs. When omitted, the complete source record is used.
+type Identity struct {
+	Fields []string `yaml:"fields"`
 }
 
 type LLM struct {
@@ -141,9 +148,41 @@ func validateRuleScalarTypes(document *yaml.Node) error {
 			if value.Kind != yaml.ScalarNode || value.Tag != "!!bool" {
 				return fmt.Errorf("enabled must be a YAML boolean")
 			}
+		case "identity":
+			if err := validateIdentityScalarTypes(value); err != nil {
+				return err
+			}
 		case "schedule":
 			if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
 				return fmt.Errorf("schedule must be a YAML string")
+			}
+		}
+	}
+	return nil
+}
+
+func validateIdentityScalarTypes(identity *yaml.Node) error {
+	if identity.Kind != yaml.MappingNode {
+		return nil // The strict decoder reports the structural error.
+	}
+	for i := 0; i < len(identity.Content); i += 2 {
+		if identity.Content[i].Value != "fields" {
+			continue
+		}
+		fields, err := resolveRuleAlias(identity.Content[i+1])
+		if err != nil {
+			return err
+		}
+		if fields.Kind != yaml.SequenceNode {
+			return nil // The strict decoder reports the structural error.
+		}
+		for _, fieldNode := range fields.Content {
+			field, err := resolveRuleAlias(fieldNode)
+			if err != nil {
+				return err
+			}
+			if field.Kind != yaml.ScalarNode || field.Tag != "!!str" {
+				return fmt.Errorf("identity.fields must contain only YAML strings")
 			}
 		}
 	}
@@ -212,6 +251,21 @@ func (c *RuleConfig) Validate() error {
 	}
 	if err := validateSourceLanguage(c.QueryEngine, c.Language, c.Query); err != nil {
 		return err
+	}
+	if c.Identity != nil {
+		if len(c.Identity.Fields) == 0 {
+			return fmt.Errorf("identity.fields must contain at least one field")
+		}
+		seenFields := make(map[string]struct{}, len(c.Identity.Fields))
+		for _, field := range c.Identity.Fields {
+			if strings.TrimSpace(field) == "" {
+				return fmt.Errorf("identity.fields cannot contain an empty field")
+			}
+			if _, duplicate := seenFields[field]; duplicate {
+				return fmt.Errorf("identity.fields contains duplicate field %q", field)
+			}
+			seenFields[field] = struct{}{}
+		}
 	}
 	if len(c.Publishers)+len(c.BestEffortPublishers) == 0 {
 		return fmt.Errorf("at least one publisher is required")
